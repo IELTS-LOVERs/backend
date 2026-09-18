@@ -1,4 +1,4 @@
-﻿# IELTS Online Examination Platform — Backend API
+﻿# IELTS LOVERs — Backend API
 
 A production-ready, modular monolith backend service for online IELTS examinations (Listening, Reading, and Writing). Built with Node.js, Express 5, TypeScript (Strict Mode), MongoDB, and MinIO S3 object storage.
 
