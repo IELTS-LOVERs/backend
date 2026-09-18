@@ -1,0 +1,67 @@
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import cookieParser from "cookie-parser";
+import { env } from "./config/env.js";
+import { sendSuccess } from "./common/utils/response.util.js";
+import { errorHandler } from "./common/middlewares/errorHandler.js";
+import { authRoutes } from "./modules/auth/auth.routes.js";
+import { userRoutes } from "./modules/users/user.routes.js";
+import { classRoutes } from "./modules/classes/class.routes.js";
+import { questionRoutes } from "./modules/questions/question.routes.js";
+import { examRoutes } from "./modules/exams/exam.routes.js";
+import { assignmentRoutes } from "./modules/assignments/assignment.routes.js";
+import { attemptRoutes } from "./modules/attempts/attempt.routes.js";
+import {
+  gradingAttemptRoutes,
+  gradingRoutes,
+  writingReviewRoutes,
+} from "./modules/grading/grading.routes.js";
+import { mediaRoutes } from "./modules/media/media.routes.js";
+import { antiCheatRoutes } from "./modules/anti-cheat/anti-cheat.routes.js";
+
+const app = express();
+
+app.use(helmet());
+app.use(
+  cors({
+    origin: env.CORS_ORIGIN,
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+app.get("/api/health", (_req, res) => {
+  sendSuccess(res, { status: "ok", timestamp: new Date() });
+});
+
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/classes", classRoutes);
+app.use("/api/questions", questionRoutes);
+app.use("/api/exams", examRoutes);
+app.use("/api/assignments", assignmentRoutes);
+app.use("/api/attempts", attemptRoutes);
+app.use("/api/attempts", gradingAttemptRoutes);
+app.use("/api/grading", gradingRoutes);
+app.use("/api/writing-reviews", writingReviewRoutes);
+app.use("/api/media", mediaRoutes);
+app.use("/api/anti-cheat", antiCheatRoutes);
+
+app.use((_req, res) => {
+  res.status(404).json({
+    success: false,
+    error: {
+      code: "NOT_FOUND",
+      message: "Endpoint không tồn tại.",
+      details: null,
+    },
+  });
+});
+
+app.use(errorHandler);
+
+export { app };
+export default app;

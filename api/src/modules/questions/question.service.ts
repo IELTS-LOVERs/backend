@@ -1,0 +1,152 @@
+import mongoose, { type UpdateQuery } from "mongoose";
+import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { QuestionModel, type IQuestion } from "./question.model.js";
+import type { CreateQuestionBody, ListQuestionsQuery, UpdateQuestionBody } from "./question.validation.js";
+
+export interface SerializedQuestion {
+  id: string;
+  skill: IQuestion["skill"];
+  type: IQuestion["type"];
+  part: number;
+  prompt: string;
+  content: string | null;
+  data: Record<string, unknown>;
+  acceptedAnswers: string[];
+  points: number;
+  explanation: string | null;
+  mediaIds: string[];
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface QuestionFilter {
+  skill?: IQuestion["skill"];
+  part?: number;
+  type?: IQuestion["type"];
+  createdBy?: string;
+}
+
+export function serializeQuestion(question: IQuestion): SerializedQuestion {
+  return {
+    id: question._id.toString(),
+    skill: question.skill,
+    type: question.type,
+    part: question.part,
+    prompt: question.prompt,
+    content: question.content ?? null,
+    data: question.data,
+    acceptedAnswers: question.acceptedAnswers,
+    points: question.points,
+    explanation: question.explanation ?? null,
+    mediaIds: question.mediaIds.map((id) => id.toString()),
+    createdBy: question.createdBy.toString(),
+    createdAt: question.createdAt,
+    updatedAt: question.updatedAt,
+  };
+}
+
+export function assertOwner(
+  question: Pick<IQuestion, "createdBy">,
+  userId: string,
+  role: string
+): void {
+  if (role === "admin") return;
+
+  if (question.createdBy.toString() !== userId) {
+    throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
+  }
+}
+
+export async function create(
+  data: CreateQuestionBody,
+  userId: string
+): Promise<SerializedQuestion> {
+  const question = await QuestionModel.create({
+    ...data,
+    type: data.type as IQuestion["type"],
+    mediaIds: data.mediaIds.map((mediaId) => new mongoose.Types.ObjectId(mediaId)),
+    createdBy: new mongoose.Types.ObjectId(userId),
+  });
+
+  return serializeQuestion(question);
+}
+
+export async function list(filters: ListQuestionsQuery): Promise<{
+  questions: SerializedQuestion[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}> {
+  const { page, limit, skill, part, type, createdBy } = filters;
+  const query: QuestionFilter = {};
+
+  if (skill) query.skill = skill;
+  if (part !== undefined) query.part = part;
+  if (type) query.type = type as IQuestion["type"];
+  if (createdBy) query.createdBy = createdBy;
+
+  const [questions, total] = await Promise.all([
+    QuestionModel.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    QuestionModel.countDocuments(query),
+  ]);
+
+  return {
+    questions: questions.map(serializeQuestion),
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  };
+}
+
+export async function getById(id: string): Promise<SerializedQuestion> {
+  const question = await QuestionModel.findById(id);
+
+  if (!question) {
+    throw new NotFoundError("Câu hỏi không tồn tại.");
+  }
+
+  return serializeQuestion(question);
+}
+
+export async function update(
+  id: string,
+  data: UpdateQuestionBody,
+  userId: string,
+  role: string
+): Promise<void> {
+  const question = await QuestionModel.findById(id);
+
+  if (!question) {
+    throw new NotFoundError("Câu hỏi không tồn tại.");
+  }
+
+  assertOwner(question, userId, role);
+
+  const updatePayload = { ...data } as UpdateQuery<IQuestion>;
+  if (data.mediaIds) {
+    updatePayload.mediaIds = data.mediaIds.map((mediaId) => new mongoose.Types.ObjectId(mediaId));
+  }
+
+  await QuestionModel.findByIdAndUpdate(id, updatePayload, {
+    new: true,
+    runValidators: true,
+  });
+}
+
+export async function remove(id: string, userId: string, role: string): Promise<void> {
+  const question = await QuestionModel.findById(id);
+
+  if (!question) {
+    throw new NotFoundError("Câu hỏi không tồn tại.");
+  }
+
+  assertOwner(question, userId, role);
+
+  await QuestionModel.deleteOne({ _id: question._id });
+}
