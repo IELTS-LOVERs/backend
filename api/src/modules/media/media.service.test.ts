@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { buildMediaObjectKey, sanitizeFilename } from "./media.service.js";
+import mongoose from "mongoose";
+import { describe, expect, it, vi } from "vitest";
+import { ForbiddenError } from "../../common/errors/AppError.js";
+import { minioClient } from "../../config/minio.js";
+import { MediaModel } from "./media.model.js";
+import {
+  buildMediaObjectKey,
+  deleteMedia,
+  listMedia,
+  sanitizeFilename,
+} from "./media.service.js";
 
 describe("sanitizeFilename", () => {
   it("replaces spaces and special characters with a dash", () => {
@@ -38,5 +47,91 @@ describe("buildMediaObjectKey", () => {
     const second = buildMediaObjectKey("audio", "part1.mp3");
 
     expect(first).not.toBe(second);
+  });
+});
+
+describe("listMedia", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+
+  it("filters by uploadedBy for teacher and includes public url", async () => {
+    const mockMediaDoc = {
+      _id: new mongoose.Types.ObjectId(),
+      bucket: "ielts-media",
+      key: "uploads/audio/test.mp3",
+      originalName: "test.mp3",
+      mimeType: "audio/mpeg",
+      size: 1024,
+      type: "audio" as const,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    let capturedQuery: unknown;
+    vi.spyOn(MediaModel, "find").mockImplementationOnce((query: unknown) => {
+      capturedQuery = query;
+      return {
+        sort: vi.fn().mockReturnValue({
+          skip: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([mockMediaDoc]),
+          }),
+        }),
+      } as never;
+    });
+    vi.spyOn(MediaModel, "countDocuments").mockResolvedValueOnce(1 as never);
+
+    const result = await listMedia(teacherId, "teacher", { page: 1, limit: 20 });
+    expect((capturedQuery as Record<string, unknown>).uploadedBy).toBeDefined();
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].url).toContain("uploads/audio/test.mp3");
+    expect(result.total).toBe(1);
+  });
+
+  it("does not filter by uploadedBy for admin", async () => {
+    let capturedQuery: unknown;
+    vi.spyOn(MediaModel, "find").mockImplementationOnce((query: unknown) => {
+      capturedQuery = query;
+      return {
+        sort: vi.fn().mockReturnValue({
+          skip: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      } as never;
+    });
+    vi.spyOn(MediaModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await listMedia("admin-id", "admin", { page: 1, limit: 20 });
+    expect((capturedQuery as Record<string, unknown>).uploadedBy).toBeUndefined();
+  });
+});
+
+describe("deleteMedia", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+  const strangerId = new mongoose.Types.ObjectId().toString();
+  const mediaId = new mongoose.Types.ObjectId().toString();
+
+  it("throws ForbiddenError when non-owner teacher attempts to delete", async () => {
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce({
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      key: "test.mp3",
+    } as never);
+
+    await expect(deleteMedia(mediaId, strangerId, "teacher")).rejects.toThrow(ForbiddenError);
+  });
+
+  it("removes object from minio and deletes record when owner deletes", async () => {
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce({
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      key: "test.mp3",
+    } as never);
+    vi.spyOn(minioClient, "removeObject").mockResolvedValueOnce(undefined as never);
+    const deleteSpy = vi.spyOn(MediaModel, "findByIdAndDelete").mockResolvedValueOnce({} as never);
+
+    await deleteMedia(mediaId, teacherId, "teacher");
+    expect(minioClient.removeObject).toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalledWith(mediaId);
   });
 });

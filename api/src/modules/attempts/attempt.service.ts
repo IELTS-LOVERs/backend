@@ -1,5 +1,6 @@
 import mongoose, { type Types } from "mongoose";
 import { EXAM_GRACE_PERIOD_SECONDS, calculateBandScore } from "../../config/constants.js";
+import { env } from "../../config/env.js";
 import {
   BadRequestError,
   ForbiddenError,
@@ -11,6 +12,8 @@ import { AssignmentModel } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel, type IExam } from "../exams/exam.model.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
+import "../questions/question.model.js";
+import "../media/media.model.js";
 import type { SkillType } from "../questions/question.model.js";
 import {
   AttemptModel,
@@ -21,6 +24,13 @@ import {
 } from "./attempt.model.js";
 import type { GetMyAttemptsQuery } from "./attempt.validation.js";
 
+export interface CandidateMediaItem {
+  id: string;
+  url: string;
+  type: "audio" | "image";
+  originalName: string;
+}
+
 export interface CandidateExamQuestion {
   id: string;
   prompt: string;
@@ -30,6 +40,7 @@ export interface CandidateExamQuestion {
   content: string | null;
   data: Record<string, unknown>;
   mediaIds: string[];
+  media: CandidateMediaItem[];
 }
 
 export interface CandidateExamSection {
@@ -39,6 +50,7 @@ export interface CandidateExamSection {
   instructions: string | null;
   passageText: string | null;
   mediaIds: string[];
+  media: CandidateMediaItem[];
   questions: CandidateExamQuestion[];
 }
 
@@ -81,6 +93,7 @@ export interface SubmitAttemptResult {
   status: AttemptStatus;
   submittedAt: Date;
   scores: IAttemptScores;
+  message?: string;
 }
 
 export interface ResultQuestionDetail {
@@ -94,11 +107,11 @@ export interface ResultQuestionDetail {
 export interface AttemptWritingReview {
   id: string;
   attemptId: string;
-  task1: {
+  task1?: {
     score: number;
     comment: string | null;
   };
-  task2: {
+  task2?: {
     score: number;
     comment: string | null;
   };
@@ -128,7 +141,7 @@ export interface RawPopulatedQuestion {
   acceptedAnswers?: string[];
   points?: number;
   explanation?: string;
-  mediaIds?: Types.ObjectId[];
+  mediaIds?: unknown[];
 }
 
 export interface RawPopulatedSection {
@@ -137,7 +150,7 @@ export interface RawPopulatedSection {
   title: string;
   instructions?: string;
   passageText?: string;
-  mediaIds?: Types.ObjectId[];
+  mediaIds?: unknown[];
   questionIds?: unknown[];
 }
 
@@ -171,6 +184,37 @@ function isPopulatedQuestion(value: unknown): value is RawPopulatedQuestion {
   );
 }
 
+function toCandidateMediaItem(item: unknown): CandidateMediaItem | null {
+  if (
+    typeof item === "object" &&
+    item !== null &&
+    "_id" in item &&
+    "key" in item &&
+    "type" in item
+  ) {
+    const mediaDoc = item as {
+      _id: Types.ObjectId | string;
+      key: string;
+      type: "audio" | "image";
+      originalName?: string;
+    };
+    return {
+      id: mediaDoc._id.toString(),
+      url: `${env.PUBLIC_MEDIA_URL}/${mediaDoc.key}`,
+      type: mediaDoc.type,
+      originalName: mediaDoc.originalName ?? "",
+    };
+  }
+  return null;
+}
+
+function extractMediaId(item: unknown): string {
+  if (typeof item === "object" && item !== null && "_id" in item) {
+    return (item as { _id: Types.ObjectId | string })._id.toString();
+  }
+  return String(item);
+}
+
 export function computeRemainingSeconds(
   expiresAt: Date,
   now: number = Date.now()
@@ -190,11 +234,21 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
     id: examObj._id.toString(),
     title: examObj.title,
     sections: (examObj.sections ?? []).map((section) => {
+      const sectionMedia = (section.mediaIds ?? [])
+        .map(toCandidateMediaItem)
+        .filter((m): m is CandidateMediaItem => m !== null);
+      const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId);
+
       const questions = (section.questionIds ?? [])
         .filter(isPopulatedQuestion)
         .map((question) => {
           delete question.acceptedAnswers;
           delete question.explanation;
+
+          const questionMedia = (question.mediaIds ?? [])
+            .map(toCandidateMediaItem)
+            .filter((m): m is CandidateMediaItem => m !== null);
+          const questionMediaIds = (question.mediaIds ?? []).map(extractMediaId);
 
           return {
             id: question._id.toString(),
@@ -204,7 +258,8 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
             points: question.points ?? 1,
             content: question.content ?? null,
             data: question.data ?? {},
-            mediaIds: (question.mediaIds ?? []).map((mediaId) => mediaId.toString()),
+            mediaIds: questionMediaIds,
+            media: questionMedia,
           };
         });
 
@@ -214,7 +269,8 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
         title: section.title,
         instructions: section.instructions ?? null,
         passageText: section.passageText ?? null,
-        mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId.toString()),
+        mediaIds: sectionMediaIds,
+        media: sectionMedia,
         questions,
       };
     }),
@@ -319,7 +375,13 @@ function serializeStartResult(attempt: IAttempt, exam: CandidateExam): StartAtte
 }
 
 async function loadPopulatedExam(examId: Types.ObjectId | string): Promise<IExam> {
-  const exam = await ExamModel.findById(examId).populate("sections.questionIds");
+  const exam = await ExamModel.findById(examId)
+    .populate({ path: "sections.mediaIds", model: "Media" })
+    .populate({
+      path: "sections.questionIds",
+      model: "Question",
+      populate: { path: "mediaIds", model: "Media" },
+    });
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
@@ -343,6 +405,14 @@ export async function startAttempt(
     throw new BadRequestError("EXAM_NOT_PUBLISHED", "Đề thi chưa được xuất bản.");
   }
 
+  if (exam.openAt && Date.now() < exam.openAt.getTime()) {
+    throw new BadRequestError("EXAM_NOT_OPENED", "Đề thi chưa đến thời gian mở.");
+  }
+
+  if (exam.closeAt && Date.now() > exam.closeAt.getTime()) {
+    throw new BadRequestError("EXAM_CLOSED", "Đề thi đã kết thúc thời gian làm bài.");
+  }
+
   if (assignmentId) {
     const assignment = await AssignmentModel.findById(assignmentId);
 
@@ -352,6 +422,19 @@ export async function startAttempt(
 
     if (assignment.status !== "active") {
       throw new BadRequestError("VALIDATION_ERROR", "Bài tập không còn hiệu lực.");
+    }
+
+    const submittedAttempt = await AttemptModel.findOne({
+      studentId,
+      assignmentId,
+      status: "submitted",
+    });
+
+    if (submittedAttempt) {
+      throw new BadRequestError(
+        "ASSIGNMENT_ALREADY_SUBMITTED",
+        "Bạn đã hoàn thành bài tập này, không thể làm lại."
+      );
     }
 
     if (assignment.examId.toString() !== examId) {
@@ -426,6 +509,88 @@ export async function startAttempt(
   }
 }
 
+export async function finalizeAttempt(
+  attempt: IAttempt,
+  submittedAt: Date,
+  message?: string
+): Promise<SubmitAttemptResult> {
+  const populatedExam = await loadPopulatedExam(attempt.examId);
+  const examObj = populatedExam.toObject() as unknown as RawExamObject;
+  const { listening, reading, hasListening, hasReading, hasWriting } =
+    collectExamQuestionBuckets(examObj);
+
+  const scores: IAttemptScores = {
+    listeningRaw: attempt.scores.listeningRaw,
+    listeningBand: attempt.scores.listeningBand,
+    readingRaw: attempt.scores.readingRaw,
+    readingBand: attempt.scores.readingBand,
+    writingTask1Band: attempt.scores.writingTask1Band,
+    writingTask2Band: attempt.scores.writingTask2Band,
+    writingBand: attempt.scores.writingBand,
+    overallBand: attempt.scores.overallBand,
+  };
+
+  if (hasListening) {
+    const rawScore = gradeQuestions(attempt.answers, listening);
+    scores.listeningRaw = rawScore;
+    scores.listeningBand = calculateBandScore(rawScore, "listening");
+  }
+
+  if (hasReading) {
+    const rawScore = gradeQuestions(attempt.answers, reading);
+    scores.readingRaw = rawScore;
+    scores.readingBand = calculateBandScore(rawScore, "reading");
+  }
+
+  if (!hasWriting && (hasListening || hasReading)) {
+    scores.overallBand = calculateOverallBand({
+      listening: scores.listeningBand,
+      reading: scores.readingBand,
+    });
+  }
+
+  const updatedAttempt = await AttemptModel.findOneAndUpdate(
+    { _id: attempt._id, studentId: attempt.studentId, status: "in_progress" },
+    {
+      $set: {
+        status: "submitted",
+        submittedAt,
+        scores,
+      },
+    },
+    { new: true }
+  );
+
+  if (!updatedAttempt) {
+    const current = await AttemptModel.findById(attempt._id);
+    if (current && current.status === "submitted") {
+      attempt.status = "submitted";
+      attempt.submittedAt = current.submittedAt;
+      attempt.scores = current.scores;
+      return {
+        attemptId: current._id.toString(),
+        status: current.status,
+        submittedAt: current.submittedAt ?? submittedAt,
+        scores: serializeScores(current.scores),
+        ...(message ? { message } : {}),
+      };
+    }
+    throw new BadRequestError("VALIDATION_ERROR", "Không thể nộp bài thi.");
+  }
+
+  attempt.status = "submitted";
+  attempt.submittedAt = submittedAt;
+  attempt.scores = updatedAttempt.scores;
+
+  return {
+    attemptId: updatedAttempt._id.toString(),
+    status: updatedAttempt.status,
+    submittedAt,
+    scores: serializeScores(updatedAttempt.scores),
+    ...(message ? { message } : {}),
+  };
+}
+
 export async function getAttemptForRecovery(
   attemptId: string,
   studentId: string
@@ -436,14 +601,13 @@ export async function getAttemptForRecovery(
   const remainingSeconds = computeRemainingSeconds(attempt.expiresAt);
 
   if (remainingSeconds <= 0 && attempt.status === "in_progress") {
-    attempt.status = "expired";
-    await attempt.save();
+    await finalizeAttempt(attempt, attempt.expiresAt);
   }
 
   return {
     attemptId: attempt._id.toString(),
     status: attempt.status,
-    remainingSeconds,
+    remainingSeconds: attempt.status === "submitted" ? 0 : remainingSeconds,
     answers: attempt.answers.map((answer) => ({
       questionId: answer.questionId.toString(),
       value: answer.value,
@@ -512,75 +676,14 @@ export async function submitAttempt(
   const graceDeadline = attempt.expiresAt.getTime() + EXAM_GRACE_PERIOD_SECONDS * 1000;
 
   if (Date.now() > graceDeadline) {
-    throw new ForbiddenError(
-      "EXAM_EXPIRED",
-      "Thời gian làm bài thi đã kết thúc. Không thể nộp bài."
+    return finalizeAttempt(
+      attempt,
+      attempt.expiresAt,
+      "Bài thi đã được tự động nộp do hết thời gian làm bài."
     );
   }
 
-  const populatedExam = await loadPopulatedExam(attempt.examId);
-  const examObj = populatedExam.toObject() as unknown as RawExamObject;
-  const { listening, reading, hasListening, hasReading, hasWriting } =
-    collectExamQuestionBuckets(examObj);
-
-  const scores: IAttemptScores = {
-    listeningRaw: attempt.scores.listeningRaw,
-    listeningBand: attempt.scores.listeningBand,
-    readingRaw: attempt.scores.readingRaw,
-    readingBand: attempt.scores.readingBand,
-    writingTask1Band: attempt.scores.writingTask1Band,
-    writingTask2Band: attempt.scores.writingTask2Band,
-    writingBand: attempt.scores.writingBand,
-    overallBand: attempt.scores.overallBand,
-  };
-
-  if (hasListening) {
-    const rawScore = gradeQuestions(attempt.answers, listening);
-    scores.listeningRaw = rawScore;
-    scores.listeningBand = calculateBandScore(rawScore, "listening");
-  }
-
-  if (hasReading) {
-    const rawScore = gradeQuestions(attempt.answers, reading);
-    scores.readingRaw = rawScore;
-    scores.readingBand = calculateBandScore(rawScore, "reading");
-  }
-
-  if (!hasWriting && (hasListening || hasReading)) {
-    scores.overallBand = calculateOverallBand({
-      listening: scores.listeningBand,
-      reading: scores.readingBand,
-    });
-  }
-
-  const submittedAt = new Date();
-
-  const updatedAttempt = await AttemptModel.findOneAndUpdate(
-    { _id: attempt._id, studentId: attempt.studentId, status: "in_progress" },
-    {
-      $set: {
-        status: "submitted",
-        submittedAt,
-        scores,
-      },
-    },
-    { new: true }
-  );
-
-  if (!updatedAttempt) {
-    const current = await AttemptModel.findById(attemptId);
-    if (current && current.status === "submitted") {
-      throw new BadRequestError("EXAM_ALREADY_SUBMITTED", "Bài thi đã được nộp trước đó.");
-    }
-    throw new BadRequestError("VALIDATION_ERROR", "Không thể nộp bài thi.");
-  }
-
-  return {
-    attemptId: updatedAttempt._id.toString(),
-    status: updatedAttempt.status,
-    submittedAt,
-    scores: serializeScores(updatedAttempt.scores),
-  };
+  return finalizeAttempt(attempt, new Date());
 }
 
 export function canAccessAttemptResult(
@@ -653,14 +756,18 @@ export async function getAttemptResult(
       ? {
           id: review._id.toString(),
           attemptId: review.attemptId.toString(),
-          task1: {
-            score: review.task1.score,
-            comment: review.task1.comment ?? null,
-          },
-          task2: {
-            score: review.task2.score,
-            comment: review.task2.comment ?? null,
-          },
+          task1: review.task1
+            ? {
+                score: review.task1.score,
+                comment: review.task1.comment ?? null,
+              }
+            : undefined,
+          task2: review.task2
+            ? {
+                score: review.task2.score,
+                comment: review.task2.comment ?? null,
+              }
+            : undefined,
           overallWritingScore: review.overallWritingScore,
           generalFeedback: review.generalFeedback ?? null,
           teacherId: review.teacherId.toString(),

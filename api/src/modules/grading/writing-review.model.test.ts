@@ -82,9 +82,39 @@ describe("WritingReviewModel", () => {
     });
 
     await expect(doc.validate()).resolves.toBeUndefined();
-    expect(doc.task1.score).toBe(6);
-    expect(doc.task1.comment).toBeUndefined();
+    expect(doc.task1?.score).toBe(6);
+    expect(doc.task1?.comment).toBeUndefined();
     expect(doc.generalFeedback).toBeUndefined();
+  });
+
+  it("accepts a review with only task1 or only task2", async () => {
+    const doc1 = new WritingReviewModel({
+      ...baseFields(),
+      task1: { score: 6.5 },
+      overallWritingScore: 6.5,
+    });
+    await expect(doc1.validate()).resolves.toBeUndefined();
+
+    const doc2 = new WritingReviewModel({
+      ...baseFields(),
+      task2: { score: 7.0 },
+      overallWritingScore: 7.0,
+    });
+    await expect(doc2.validate()).resolves.toBeUndefined();
+  });
+
+  it("rejects a review when both task1 and task2 are omitted", async () => {
+    let error: ValidationError | undefined;
+    try {
+      await new WritingReviewModel({
+        ...baseFields(),
+        overallWritingScore: 6.5,
+      }).validate();
+    } catch (err) {
+      error = err as ValidationError;
+    }
+
+    expect(error?.errors.task1).toBeDefined();
   });
 
   it("registers a unique index on attemptId", () => {

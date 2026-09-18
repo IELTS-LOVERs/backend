@@ -5,6 +5,8 @@ import { AttemptModel } from "../attempts/attempt.model.js";
 import { ExamModel } from "./exam.model.js";
 import {
   assertOwnership,
+  getById,
+  list,
   mapSections,
   publish,
   serializeQuestion,
@@ -180,5 +182,40 @@ describe("publish and unpublish", () => {
     expect(result.status).toBe("draft");
     expect(mockExam.status).toBe("draft");
     expect(mockExam.save).toHaveBeenCalled();
+  });
+});
+
+describe("student access to exams", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+
+  it("forces status: 'published' when role is student in list", async () => {
+    let capturedQuery: unknown;
+    vi.spyOn(ExamModel, "find").mockImplementationOnce((query: unknown) => {
+      capturedQuery = query;
+      return {
+        sort: vi.fn().mockReturnValue({
+          skip: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      } as never;
+    });
+    vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await list(studentId, "student", { page: 1, limit: 10 });
+    expect(capturedQuery).toEqual({ status: "published" });
+  });
+
+  it("throws ForbiddenError when student tries to get non-published exam", async () => {
+    const draftExam = {
+      _id: new mongoose.Types.ObjectId(),
+      status: "draft",
+      sections: [],
+    };
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue(draftExam),
+    } as never);
+
+    await expect(getById("exam-123", studentId, "student")).rejects.toThrow(ForbiddenError);
   });
 });

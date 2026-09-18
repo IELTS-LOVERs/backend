@@ -8,7 +8,7 @@ import {
 import { env } from "../../config/env.js";
 import { minioClient } from "../../config/minio.js";
 import { MediaModel, type MediaType } from "./media.model.js";
-import type { PresignUploadBody } from "./media.validation.js";
+import type { ListMediaQuery, PresignUploadBody } from "./media.validation.js";
 
 export const PRESIGN_EXPIRES_IN_SECONDS = 15 * 60;
 
@@ -22,6 +22,28 @@ export interface PresignedUploadResult {
 export interface ConfirmUploadResult {
   id: string;
   status: "confirmed";
+}
+
+export interface MediaListItem {
+  id: string;
+  bucket: string;
+  key: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  type: MediaType;
+  url: string;
+  uploadedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ListMediaResult {
+  items: MediaListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 /** Keeps only safe filename characters, collapsing the rest into a dash. */
@@ -98,4 +120,79 @@ export async function confirmUpload(
   }
 
   return { id: mediaId, status: "confirmed" };
+}
+
+export async function listMedia(
+  userId: string,
+  role: string,
+  filters: ListMediaQuery
+): Promise<ListMediaResult> {
+  const page = filters.page ?? 1;
+  const limit = filters.limit ?? 20;
+  const skip = (page - 1) * limit;
+
+  const query: Record<string, unknown> = {};
+
+  if (role !== "admin") {
+    query.uploadedBy = new mongoose.Types.ObjectId(userId);
+  }
+
+  if (filters.type) {
+    query.type = filters.type;
+  }
+
+  const [items, total] = await Promise.all([
+    MediaModel.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    MediaModel.countDocuments(query),
+  ]);
+
+  return {
+    items: items.map((item) => ({
+      id: item._id.toString(),
+      bucket: item.bucket,
+      key: item.key,
+      originalName: item.originalName,
+      mimeType: item.mimeType,
+      size: item.size,
+      type: item.type,
+      url: `${env.PUBLIC_MEDIA_URL}/${item.key}`,
+      uploadedBy: item.uploadedBy.toString(),
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    })),
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit) || 1,
+  };
+}
+
+export async function deleteMedia(
+  id: string,
+  userId: string,
+  role: string
+): Promise<void> {
+  const media = await MediaModel.findById(id);
+
+  if (!media) {
+    throw new NotFoundError("Media không tồn tại.");
+  }
+
+  if (role !== "admin" && media.uploadedBy.toString() !== userId) {
+    throw new ForbiddenError(
+      "FORBIDDEN",
+      "Người dùng không đủ quyền thực hiện hành động."
+    );
+  }
+
+  try {
+    await minioClient.removeObject(env.MINIO_BUCKET, media.key);
+  } catch {
+    // MinIO object might already be gone
+  }
+
+  await MediaModel.findByIdAndDelete(id);
 }

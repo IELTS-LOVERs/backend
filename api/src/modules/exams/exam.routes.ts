@@ -7,11 +7,12 @@ import { CreateExamSchema, ListExamsSchema, UpdateExamSchema } from "./exam.vali
 
 const router = Router();
 
+router.get("/", authenticate, validate(ListExamsSchema), examController.listExams);
+router.get("/:id", authenticate, examController.getExam);
+
 router.use(authenticate, requireRoles("teacher", "admin"));
 
-router.get("/", validate(ListExamsSchema), examController.listExams);
 router.post("/", validate(CreateExamSchema), examController.createExam);
-router.get("/:id", examController.getExam);
 router.put("/:id", validate(UpdateExamSchema), examController.updateExam);
 router.delete("/:id", examController.deleteExam);
 router.post("/:id/clone", examController.cloneExam);

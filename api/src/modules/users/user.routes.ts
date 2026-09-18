@@ -4,11 +4,12 @@ import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as dashboardController from "../dashboard/dashboard.controller.js";
 import * as userController from "./user.controller.js";
-import { AdminResetPasswordSchema } from "./user.validation.js";
+import { AdminResetPasswordSchema, UpdateProfileSchema } from "./user.validation.js";
 
 const router = Router();
 
 router.get("/me", authenticate, userController.getMe);
+router.patch("/me", authenticate, validate(UpdateProfileSchema), userController.updateMe);
 router.get(
   "/dashboard/student",
   authenticate,

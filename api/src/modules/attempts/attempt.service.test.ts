@@ -1,15 +1,19 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
-import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
-import type { IExam } from "../exams/exam.model.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { ExamModel, type IExam } from "../exams/exam.model.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel, type IAttemptAnswer } from "./attempt.model.js";
 import {
   buildCandidateExam,
   canAccessAttemptResult,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
+  getAttemptForRecovery,
   getAttemptResult,
   gradeQuestions,
+  startAttempt,
+  submitAttempt,
   type RawExamObject,
   type RawPopulatedQuestion,
 } from "./attempt.service.js";
@@ -86,6 +90,47 @@ describe("buildCandidateExam", () => {
     expect(question.prompt).toBe("Write the answer.");
     expect(question.points).toBe(2);
     expect(question.content).toBeNull();
+  });
+
+  it("populates media URLs for section and question media", () => {
+    const sectionMediaDoc = {
+      _id: new mongoose.Types.ObjectId(),
+      key: "audio/test.mp3",
+      type: "audio" as const,
+      originalName: "test.mp3",
+    };
+    const questionMediaDoc = {
+      _id: new mongoose.Types.ObjectId(),
+      key: "images/diagram.png",
+      type: "image" as const,
+      originalName: "diagram.png",
+    };
+
+    const examWithMedia = {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Media Exam",
+        sections: [
+          {
+            skill: "listening",
+            part: 1,
+            title: "Section 1",
+            instructions: "Listen",
+            passageText: null,
+            mediaIds: [sectionMediaDoc],
+            questionIds: [makeQuestion({ mediaIds: [questionMediaDoc] })],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+
+    const candidate = buildCandidateExam(examWithMedia);
+    expect(candidate.sections[0].media).toHaveLength(1);
+    expect(candidate.sections[0].media[0].url).toContain("audio/test.mp3");
+    expect(candidate.sections[0].media[0].type).toBe("audio");
+    expect(candidate.sections[0].questions[0].media).toHaveLength(1);
+    expect(candidate.sections[0].questions[0].media[0].url).toContain("images/diagram.png");
+    expect(candidate.sections[0].questions[0].media[0].type).toBe("image");
   });
 });
 
@@ -248,5 +293,127 @@ describe("getAttemptResult permissions", () => {
     await expect(
       getAttemptResult(attemptId.toString(), { id: adminId.toString(), role: "admin" })
     ).rejects.toThrow("Bài thi chưa được nộp.");
+  });
+});
+
+describe("startAttempt guards", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+  const assignmentId = new mongoose.Types.ObjectId().toString();
+
+  it("throws BadRequestError (EXAM_NOT_OPENED) when current time is before openAt", async () => {
+    const futureOpenAt = new Date(Date.now() + 3_600_000);
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      status: "published",
+      openAt: futureOpenAt,
+    } as never);
+
+    await expect(startAttempt(studentId, examId)).rejects.toThrow(BadRequestError);
+  });
+
+  it("throws BadRequestError (EXAM_CLOSED) when current time is after closeAt", async () => {
+    const pastCloseAt = new Date(Date.now() - 3_600_000);
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      status: "published",
+      closeAt: pastCloseAt,
+    } as never);
+
+    await expect(startAttempt(studentId, examId)).rejects.toThrow(BadRequestError);
+  });
+
+  it("throws BadRequestError (ASSIGNMENT_ALREADY_SUBMITTED) when assignment has already been submitted", async () => {
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      status: "published",
+    } as never);
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce({
+      _id: assignmentId,
+      status: "active",
+      examId,
+    } as never);
+    vi.spyOn(AttemptModel, "findOne").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+      status: "submitted",
+    } as never);
+
+    await expect(startAttempt(studentId, examId, assignmentId)).rejects.toThrow(BadRequestError);
+  });
+});
+
+describe("auto-finalize when expired", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+  const attemptId = new mongoose.Types.ObjectId().toString();
+  const expiredAt = new Date(Date.now() - 100_000);
+
+  it("auto-finalizes expired attempt on submit without throwing 403", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId,
+      examId,
+      status: "in_progress",
+      expiresAt: expiredAt,
+      answers: [],
+      scores: {},
+      save: vi.fn(),
+    };
+    vi.spyOn(AttemptModel, "findById").mockResolvedValue(mockAttempt as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          toObject: () => ({
+            _id: examId,
+            sections: [],
+          }),
+        }),
+      }),
+    } as never);
+    vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
+      _id: attemptId,
+      status: "submitted",
+      submittedAt: expiredAt,
+      scores: {},
+    } as never);
+
+    const result = await submitAttempt(attemptId, studentId);
+    expect(result.status).toBe("submitted");
+    expect(result.message).toBeDefined();
+    expect(result.submittedAt).toEqual(expiredAt);
+  });
+
+  it("auto-finalizes expired attempt on getAttemptForRecovery when remainingSeconds <= 0", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId,
+      examId,
+      status: "in_progress",
+      expiresAt: expiredAt,
+      answers: [],
+      scores: {},
+      save: vi.fn(),
+    };
+    vi.spyOn(AttemptModel, "findById").mockResolvedValue(mockAttempt as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          toObject: () => ({
+            _id: examId,
+            sections: [],
+          }),
+        }),
+      }),
+    } as never);
+    vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
+      _id: attemptId,
+      status: "submitted",
+      submittedAt: expiredAt,
+      scores: {},
+    } as never);
+
+    const result = await getAttemptForRecovery(attemptId, studentId);
+    expect(result.status).toBe("submitted");
+    expect(result.remainingSeconds).toBe(0);
   });
 });

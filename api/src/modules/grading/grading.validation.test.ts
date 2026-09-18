@@ -66,4 +66,35 @@ describe("GradeWritingSchema", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("accepts a grading payload with only task1 or only task2", () => {
+    const task1Only = GradeWritingSchema.safeParse({
+      body: {
+        attemptId: "66e8681c262f3b9200000007",
+        task1: { score: 6.5 },
+      },
+    });
+    expect(task1Only.success).toBe(true);
+
+    const task2Only = GradeWritingSchema.safeParse({
+      body: {
+        attemptId: "66e8681c262f3b9200000007",
+        task2: { score: 7.0 },
+      },
+    });
+    expect(task2Only.success).toBe(true);
+  });
+
+  it("rejects a grading payload when both task1 and task2 are omitted", () => {
+    const result = GradeWritingSchema.safeParse({
+      body: {
+        attemptId: "66e8681c262f3b9200000007",
+        generalFeedback: "Thiếu bài làm",
+      },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe("Phải nhập điểm cho ít nhất một Task Writing");
+    }
+  });
 });

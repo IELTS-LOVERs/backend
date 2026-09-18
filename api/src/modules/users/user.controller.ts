@@ -17,6 +17,19 @@ export async function getMe(req: Request, res: Response): Promise<void> {
   sendSuccess(res, toSafeUser(user));
 }
 
+export async function updateMe(req: Request, res: Response): Promise<void> {
+  const userId = req.user?.id;
+  if (!userId) {
+    throw new UnauthorizedError(
+      "UNAUTHORIZED",
+      "Token không hợp lệ hoặc thiếu Authorization Header."
+    );
+  }
+
+  const user = await userService.updateProfile(userId, req.body);
+  sendSuccess(res, toSafeUser(user));
+}
+
 export async function adminResetPassword(req: Request, res: Response): Promise<void> {
   const userId = req.params.id as string;
   await userService.resetPassword(userId, req.body.newPassword);

@@ -174,8 +174,12 @@ export async function list(
   const { status, page, limit } = filters;
   const query: ExamFilter = {};
 
-  if (role !== "admin") query.createdBy = userId;
-  if (status) query.status = status;
+  if (role === "student") {
+    query.status = "published";
+  } else {
+    if (role !== "admin") query.createdBy = userId;
+    if (status) query.status = status;
+  }
 
   const [exams, total] = await Promise.all([
     ExamModel.find(query)
@@ -211,7 +215,11 @@ export async function getById(
     throw new NotFoundError("Đề thi không tồn tại.");
   }
 
-  if (userId && role && role !== "admin" && exam.status === "draft") {
+  if (role === "student" && exam.status !== "published") {
+    throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
+  }
+
+  if (userId && role && role !== "admin" && role !== "student" && exam.status === "draft") {
     if (exam.createdBy.toString() !== userId) {
       throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
     }

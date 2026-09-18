@@ -45,8 +45,8 @@ export interface AttemptGradingView {
 export interface GradeWritingResult {
   id: string;
   attemptId: string;
-  task1Score: number;
-  task2Score: number;
+  task1Score?: number;
+  task2Score?: number;
   overallWritingScore: number;
   attemptOverallBand: number;
 }
@@ -269,20 +269,34 @@ export async function gradeWriting(
 
   assertTeacherOwnsAttempt(attempt, teacherId, role);
 
-  const overallWritingScore = calculateWritingBand(data.task1.score, data.task2.score);
+  let overallWritingScore: number;
+  if (data.task1 && data.task2) {
+    overallWritingScore = calculateWritingBand(data.task1.score, data.task2.score);
+  } else if (data.task1) {
+    overallWritingScore = data.task1.score;
+  } else if (data.task2) {
+    overallWritingScore = data.task2.score;
+  } else {
+    throw new BadRequestError("VALIDATION_ERROR", "Phải nhập điểm cho ít nhất một Task Writing.");
+  }
+
+  const setFields: Record<string, unknown> = {
+    studentId: attempt.studentId,
+    teacherId: new mongoose.Types.ObjectId(teacherId),
+    overallWritingScore,
+    generalFeedback: data.generalFeedback,
+  };
+
+  if (data.task1) {
+    setFields.task1 = { score: data.task1.score, comment: data.task1.comment };
+  }
+  if (data.task2) {
+    setFields.task2 = { score: data.task2.score, comment: data.task2.comment };
+  }
 
   const review = await WritingReviewModel.findOneAndUpdate(
     { attemptId: attempt._id },
-    {
-      $set: {
-        studentId: attempt.studentId,
-        teacherId: new mongoose.Types.ObjectId(teacherId),
-        task1: { score: data.task1.score, comment: data.task1.comment },
-        task2: { score: data.task2.score, comment: data.task2.comment },
-        overallWritingScore,
-        generalFeedback: data.generalFeedback,
-      },
-    },
+    { $set: setFields },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
   );
 
@@ -290,8 +304,12 @@ export async function gradeWriting(
     throw new NotFoundError("Không thể lưu đánh giá Writing.");
   }
 
-  attempt.scores.writingTask1Band = data.task1.score;
-  attempt.scores.writingTask2Band = data.task2.score;
+  if (data.task1) {
+    attempt.scores.writingTask1Band = data.task1.score;
+  }
+  if (data.task2) {
+    attempt.scores.writingTask2Band = data.task2.score;
+  }
   attempt.scores.writingBand = overallWritingScore;
   attempt.scores.overallBand = calculateOverallBand({
     listening: attempt.scores.listeningBand,
@@ -303,8 +321,8 @@ export async function gradeWriting(
   return {
     id: review._id.toString(),
     attemptId: attempt._id.toString(),
-    task1Score: data.task1.score,
-    task2Score: data.task2.score,
+    task1Score: data.task1?.score,
+    task2Score: data.task2?.score,
     overallWritingScore,
     attemptOverallBand: attempt.scores.overallBand ?? overallWritingScore,
   };

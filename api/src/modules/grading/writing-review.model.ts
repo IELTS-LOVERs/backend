@@ -12,8 +12,8 @@ export interface IWritingReview extends mongoose.Document {
   attemptId: Types.ObjectId;
   studentId: Types.ObjectId;
   teacherId: Types.ObjectId;
-  task1: ITaskGrade;
-  task2: ITaskGrade;
+  task1?: ITaskGrade;
+  task2?: ITaskGrade;
   overallWritingScore: number;
   generalFeedback?: string;
   createdAt: Date;
@@ -33,13 +33,19 @@ const WritingReviewSchema = new Schema<IWritingReview>(
     attemptId: { type: Schema.Types.ObjectId, ref: "Attempt", required: true, unique: true },
     studentId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     teacherId: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    task1: { type: TaskGradeSchema, required: true },
-    task2: { type: TaskGradeSchema, required: true },
+    task1: { type: TaskGradeSchema, required: false },
+    task2: { type: TaskGradeSchema, required: false },
     overallWritingScore: { type: Number, required: true, min: 0, max: 9.0 },
     generalFeedback: { type: String },
   },
   { timestamps: true, versionKey: false }
 );
+
+WritingReviewSchema.pre("validate", function () {
+  if (!this.task1 && !this.task2) {
+    this.invalidate("task1", "Phải nhập điểm cho ít nhất một Task Writing.");
+  }
+});
 
 WritingReviewSchema.index({ attemptId: 1 }, { unique: true });
 WritingReviewSchema.index({ teacherId: 1 });
