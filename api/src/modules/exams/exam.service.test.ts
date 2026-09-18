@@ -1,7 +1,15 @@
 import mongoose from "mongoose";
-import { describe, expect, it } from "vitest";
-import { ForbiddenError } from "../../common/errors/AppError.js";
-import { assertOwnership, mapSections, serializeQuestion } from "./exam.service.js";
+import { describe, expect, it, vi } from "vitest";
+import { BadRequestError, ForbiddenError } from "../../common/errors/AppError.js";
+import { AttemptModel } from "../attempts/attempt.model.js";
+import { ExamModel } from "./exam.model.js";
+import {
+  assertOwnership,
+  mapSections,
+  publish,
+  serializeQuestion,
+  unpublish,
+} from "./exam.service.js";
 
 describe("mapSections", () => {
   it("converts hex strings to ObjectIds for mediaIds and questionIds", () => {
@@ -78,5 +86,99 @@ describe("serializeQuestion", () => {
     expect(serialized.content).toBeNull();
     expect(serialized.explanation).toBeNull();
     expect(serialized.createdBy).toBe(cId.toString());
+  });
+});
+
+describe("publish and unpublish", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+
+  it("throws BadRequestError (EXAM_EMPTY) when publishing exam with no sections", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      sections: [],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      BadRequestError
+    );
+  });
+
+  it("throws BadRequestError (EXAM_EMPTY) when sections have 0 questions", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      sections: [{ questionIds: [] }],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      BadRequestError
+    );
+  });
+
+  it("publishes successfully when sections have at least one question", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      sections: [{ questionIds: [new mongoose.Types.ObjectId()] }],
+      status: "draft",
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    const result = await publish(examId.toString(), teacherId.toString(), "teacher");
+    expect(result.status).toBe("published");
+    expect(mockExam.status).toBe("published");
+    expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("throws BadRequestError (EXAM_NOT_PUBLISHED) when unpublishing non-published exam", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "draft",
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(unpublish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      BadRequestError
+    );
+  });
+
+  it("throws BadRequestError (EXAM_HAS_ATTEMPTS) when unpublishing exam with student attempts", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "published",
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(2 as never);
+
+    await expect(unpublish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      BadRequestError
+    );
+  });
+
+  it("unpublishes successfully when published and has 0 attempts", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "published",
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    const result = await unpublish(examId.toString(), teacherId.toString(), "teacher");
+    expect(result.status).toBe("draft");
+    expect(mockExam.status).toBe("draft");
+    expect(mockExam.save).toHaveBeenCalled();
   });
 });

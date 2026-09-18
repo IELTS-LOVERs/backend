@@ -65,4 +65,13 @@ describe("ListQuestionsSchema", () => {
       expect(result.data.query.limit).toBe(10);
     }
   });
+
+  it("accepts search keyword in query", () => {
+    const result = ListQuestionsSchema.safeParse({ query: { search: "vocabulary" } });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.query.search).toBe("vocabulary");
+    }
+  });
 });

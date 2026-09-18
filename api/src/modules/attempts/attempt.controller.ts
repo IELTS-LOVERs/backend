@@ -50,7 +50,7 @@ export async function submit(req: Request, res: Response): Promise<void> {
 export async function getResult(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;
-  const result = await attemptService.getAttemptResult(id, user);
+  const result = await attemptService.getAttemptResult(id, { id: user.id, role: user.role });
   sendSuccess(res, result);
 }
 

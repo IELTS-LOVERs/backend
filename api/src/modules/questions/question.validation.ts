@@ -30,6 +30,7 @@ export const ListQuestionsSchema = z.object({
     part: z.coerce.number().int().min(1).max(4).optional(),
     type: z.string().optional(),
     createdBy: z.string().optional(),
+    search: z.string().optional(),
     page: z.coerce.number().int().positive().default(1),
     limit: z.coerce.number().int().positive().max(100).default(20),
   }),

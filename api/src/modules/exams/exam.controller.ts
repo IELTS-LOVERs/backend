@@ -66,6 +66,13 @@ export async function publishExam(req: Request, res: Response): Promise<void> {
   sendSuccess(res, exam);
 }
 
+export async function unpublishExam(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const result = await examService.unpublish(id, user.id, user.role);
+  sendSuccess(res, result);
+}
+
 export async function closeExam(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;

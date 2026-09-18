@@ -1,5 +1,6 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { AttemptModel } from "../attempts/attempt.model.js";
 import type { SkillType } from "../questions/question.model.js";
 import { ExamModel, type ExamStatus, type IExam, type IExamSection } from "./exam.model.js";
 import type { CreateExamBody, ExamSectionInput, UpdateExamBody } from "./exam.validation.js";
@@ -320,7 +321,45 @@ export async function publish(
 ): Promise<{ id: string; status: ExamStatus }> {
   const exam = await findOwnedExam(id, userId, role);
 
+  if (
+    exam.sections.length === 0 ||
+    exam.sections.every((s) => s.questionIds.length === 0)
+  ) {
+    throw new BadRequestError(
+      "EXAM_EMPTY",
+      "Đề thi phải có ít nhất một câu hỏi để xuất bản."
+    );
+  }
+
   exam.status = "published";
+  await exam.save();
+
+  return { id: exam._id.toString(), status: exam.status };
+}
+
+export async function unpublish(
+  id: string,
+  userId: string,
+  role: string
+): Promise<{ id: string; status: ExamStatus }> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  if (exam.status !== "published") {
+    throw new BadRequestError(
+      "EXAM_NOT_PUBLISHED",
+      "Chỉ có thể hủy xuất bản đề thi đang ở trạng thái published."
+    );
+  }
+
+  const attemptCount = await AttemptModel.countDocuments({ examId: exam._id });
+  if (attemptCount > 0) {
+    throw new BadRequestError(
+      "EXAM_HAS_ATTEMPTS",
+      "Không thể hủy xuất bản đề thi đã có học sinh làm bài."
+    );
+  }
+
+  exam.status = "draft";
   await exam.save();
 
   return { id: exam._id.toString(), status: exam.status };

@@ -14,3 +14,13 @@ export const CreateAssignmentSchema = z.object({
 });
 
 export type CreateAssignmentBody = z.infer<typeof CreateAssignmentSchema>["body"];
+
+export const ListAssignmentsQuerySchema = z.object({
+  query: z.object({
+    classId: z.string().optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(20),
+  }),
+});
+
+export type ListAssignmentsQuery = z.infer<typeof ListAssignmentsQuerySchema>["query"];

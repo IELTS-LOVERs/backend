@@ -1,12 +1,14 @@
 import mongoose from "mongoose";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import type { IExam } from "../exams/exam.model.js";
-import type { IAttemptAnswer } from "./attempt.model.js";
+import { AttemptModel, type IAttemptAnswer } from "./attempt.model.js";
 import {
   buildCandidateExam,
   canAccessAttemptResult,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
+  getAttemptResult,
   gradeQuestions,
   type RawExamObject,
   type RawPopulatedQuestion,
@@ -191,5 +193,60 @@ describe("canAccessAttemptResult", () => {
     expect(
       canAccessAttemptResult("student-123", { id: "student-456", role: "student" })
     ).toBe(false);
+  });
+});
+
+describe("getAttemptResult permissions", () => {
+  const attemptId = new mongoose.Types.ObjectId();
+  const studentOwnerId = new mongoose.Types.ObjectId();
+  const strangerStudentId = new mongoose.Types.ObjectId();
+  const teacherId = new mongoose.Types.ObjectId();
+  const adminId = new mongoose.Types.ObjectId();
+
+  it("throws NotFoundError when attempt does not exist", async () => {
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: studentOwnerId.toString(), role: "student" })
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws ForbiddenError (ATTEMPT_NOT_OWNED) when student does not own attempt", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+    };
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: strangerStudentId.toString(), role: "student" })
+    ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("allows teacher to access student attempt without ATTEMPT_NOT_OWNED error", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "in_progress", // not submitted, will throw EXAM_NOT_SUBMITTED, proving it passed permission check
+    };
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: teacherId.toString(), role: "teacher" })
+    ).rejects.toThrow("Bài thi chưa được nộp.");
+  });
+
+  it("allows admin to access student attempt without ATTEMPT_NOT_OWNED error", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "in_progress",
+    };
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: adminId.toString(), role: "admin" })
+    ).rejects.toThrow("Bài thi chưa được nộp.");
   });
 });

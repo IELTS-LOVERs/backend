@@ -1,8 +1,8 @@
 import mongoose from "mongoose";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ForbiddenError } from "../../common/errors/AppError.js";
-import type { IQuestion } from "./question.model.js";
-import { assertOwner, serializeQuestion } from "./question.service.js";
+import { QuestionModel, type IQuestion } from "./question.model.js";
+import { assertOwner, list, serializeQuestion } from "./question.service.js";
 
 describe("serializeQuestion", () => {
   it("converts ObjectIds to strings and normalizes null fields", () => {
@@ -58,5 +58,35 @@ describe("assertOwner", () => {
   it("throws ForbiddenError for non-owner teacher", () => {
     const question = { createdBy: creatorId };
     expect(() => assertOwner(question, "other-teacher-id", "teacher")).toThrow(ForbiddenError);
+  });
+});
+
+describe("list questions with search", () => {
+  it("builds $or regex query when search filter is supplied", async () => {
+    let capturedQuery: unknown;
+    const mockFind = {
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(QuestionModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query;
+      return mockFind as never;
+    });
+    vi.spyOn(QuestionModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await list({
+      page: 1,
+      limit: 20,
+      search: "environment",
+    });
+
+    expect(capturedQuery).toBeDefined();
+    const queryObj = capturedQuery as { $or?: Array<{ prompt?: RegExp; content?: RegExp }> };
+    expect(queryObj.$or).toHaveLength(2);
+    expect(queryObj.$or?.[0].prompt?.source).toBe("environment");
+    expect(queryObj.$or?.[0].prompt?.flags).toContain("i");
+    expect(queryObj.$or?.[1].content?.source).toBe("environment");
+    expect(queryObj.$or?.[1].content?.flags).toContain("i");
   });
 });

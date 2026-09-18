@@ -20,11 +20,16 @@ export interface SerializedQuestion {
   updatedAt: Date;
 }
 
+export interface ListQuestionsFilters extends ListQuestionsQuery {
+  search?: string;
+}
+
 interface QuestionFilter {
   skill?: IQuestion["skill"];
   part?: number;
   type?: IQuestion["type"];
   createdBy?: string;
+  $or?: Array<{ prompt?: RegExp; content?: RegExp }>;
 }
 
 export function serializeQuestion(question: IQuestion): SerializedQuestion {
@@ -72,7 +77,7 @@ export async function create(
   return serializeQuestion(question);
 }
 
-export async function list(filters: ListQuestionsQuery): Promise<{
+export async function list(filters: ListQuestionsFilters): Promise<{
   questions: SerializedQuestion[];
   page: number;
   limit: number;
@@ -86,6 +91,11 @@ export async function list(filters: ListQuestionsQuery): Promise<{
   if (part !== undefined) query.part = part;
   if (type) query.type = type as IQuestion["type"];
   if (createdBy) query.createdBy = createdBy;
+
+  if (filters.search && filters.search.trim().length > 0) {
+    const searchRegex = new RegExp(filters.search.trim(), "i");
+    query.$or = [{ prompt: searchRegex }, { content: searchRegex }];
+  }
 
   const [questions, total] = await Promise.all([
     QuestionModel.find(query)

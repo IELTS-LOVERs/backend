@@ -595,7 +595,7 @@ export function canAccessAttemptResult(
 
 export async function getAttemptResult(
   attemptId: string,
-  userOrStudentId: string | { id: string; role: string }
+  currentUser: { id: string; role: string }
 ): Promise<AttemptResult> {
   const attempt = await AttemptModel.findById(attemptId);
 
@@ -603,12 +603,10 @@ export async function getAttemptResult(
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
-  const userId =
-    typeof userOrStudentId === "string" ? userOrStudentId : userOrStudentId.id;
-  const userRole =
-    typeof userOrStudentId === "string" ? "student" : userOrStudentId.role;
-
-  if (!canAccessAttemptResult(attempt.studentId.toString(), { id: userId, role: userRole })) {
+  if (
+    currentUser.role === "student" &&
+    attempt.studentId.toString() !== currentUser.id
+  ) {
     throw new ForbiddenError(
       "ATTEMPT_NOT_OWNED",
       "Học sinh không có quyền truy cập bài làm này."
