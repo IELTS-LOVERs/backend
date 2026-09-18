@@ -1,19 +1,25 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
+import { env } from "../../config/env.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel, type IExam } from "../exams/exam.model.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
+import { WritingReviewModel } from "../grading/writing-review.model.js";
 import { AttemptModel, type IAttemptAnswer } from "./attempt.model.js";
 import {
+  applyQuestionOrder,
   buildCandidateExam,
   canAccessAttemptResult,
+  collectCandidateQuestionIds,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
   getAttemptForRecovery,
   getAttemptResult,
   gradeQuestions,
+  shuffleQuestionIds,
   startAttempt,
   submitAttempt,
+  type CandidateExam,
   type RawExamObject,
   type RawPopulatedQuestion,
 } from "./attempt.service.js";
@@ -249,7 +255,11 @@ describe("getAttemptResult permissions", () => {
   const adminId = new mongoose.Types.ObjectId();
 
   it("throws NotFoundError when attempt does not exist", async () => {
-    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(null),
+      }),
+    } as never);
 
     await expect(
       getAttemptResult(attemptId.toString(), { id: studentOwnerId.toString(), role: "student" })
@@ -262,24 +272,53 @@ describe("getAttemptResult permissions", () => {
       studentId: studentOwnerId,
       status: "submitted",
     };
-    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
 
     await expect(
       getAttemptResult(attemptId.toString(), { id: strangerStudentId.toString(), role: "student" })
     ).rejects.toThrow(ForbiddenError);
   });
 
-  it("allows teacher to access student attempt without ATTEMPT_NOT_OWNED error", async () => {
+  it("allows the exam owner teacher to access a student attempt", async () => {
     const mockAttempt = {
       _id: attemptId,
       studentId: studentOwnerId,
       status: "in_progress", // not submitted, will throw EXAM_NOT_SUBMITTED, proving it passed permission check
+      examId: { _id: new mongoose.Types.ObjectId(), createdBy: teacherId },
+      assignmentId: null,
     };
-    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
 
     await expect(
       getAttemptResult(attemptId.toString(), { id: teacherId.toString(), role: "teacher" })
     ).rejects.toThrow("Bài thi chưa được nộp.");
+  });
+
+  it("denies a teacher who owns neither the exam nor the assignment", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: new mongoose.Types.ObjectId(), createdBy: new mongoose.Types.ObjectId() },
+      assignmentId: null,
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: teacherId.toString(), role: "teacher" })
+    ).rejects.toThrow(ForbiddenError);
   });
 
   it("allows admin to access student attempt without ATTEMPT_NOT_OWNED error", async () => {
@@ -287,8 +326,14 @@ describe("getAttemptResult permissions", () => {
       _id: attemptId,
       studentId: studentOwnerId,
       status: "in_progress",
+      examId: { _id: new mongoose.Types.ObjectId(), createdBy: new mongoose.Types.ObjectId() },
+      assignmentId: null,
     };
-    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
 
     await expect(
       getAttemptResult(attemptId.toString(), { id: adminId.toString(), role: "admin" })
@@ -323,7 +368,7 @@ describe("startAttempt guards", () => {
     await expect(startAttempt(studentId, examId)).rejects.toThrow(BadRequestError);
   });
 
-  it("throws BadRequestError (ASSIGNMENT_ALREADY_SUBMITTED) when assignment has already been submitted", async () => {
+  it("throws BadRequestError (ASSIGNMENT_MAX_ATTEMPTS_REACHED) when the student used all attempts", async () => {
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
       _id: examId,
       status: "published",
@@ -332,13 +377,27 @@ describe("startAttempt guards", () => {
       _id: assignmentId,
       status: "active",
       examId,
+      maxAttempts: 1,
     } as never);
-    vi.spyOn(AttemptModel, "findOne").mockResolvedValueOnce({
-      _id: new mongoose.Types.ObjectId(),
-      status: "submitted",
-    } as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(1 as never);
 
     await expect(startAttempt(studentId, examId, assignmentId)).rejects.toThrow(BadRequestError);
+  });
+
+  it("throws ASSIGNMENT_REQUIRED when flag enabled and no assignmentId is given", async () => {
+    const original = env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT;
+    env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT = true;
+
+    try {
+      vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+        _id: examId,
+        status: "published",
+      } as never);
+
+      await expect(startAttempt(studentId, examId)).rejects.toThrow(/bài tập được giao/);
+    } finally {
+      env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT = original;
+    }
   });
 });
 
@@ -372,13 +431,13 @@ describe("auto-finalize when expired", () => {
     } as never);
     vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: attemptId,
-      status: "submitted",
+      status: "expired",
       submittedAt: expiredAt,
       scores: {},
     } as never);
 
     const result = await submitAttempt(attemptId, studentId);
-    expect(result.status).toBe("submitted");
+    expect(result.status).toBe("expired");
     expect(result.message).toBeDefined();
     expect(result.submittedAt).toEqual(expiredAt);
   });
@@ -407,13 +466,180 @@ describe("auto-finalize when expired", () => {
     } as never);
     vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: attemptId,
-      status: "submitted",
+      status: "expired",
       submittedAt: expiredAt,
       scores: {},
     } as never);
 
     const result = await getAttemptForRecovery(attemptId, studentId);
-    expect(result.status).toBe("submitted");
+    expect(result.status).toBe("expired");
     expect(result.remainingSeconds).toBe(0);
+  });
+});
+
+describe("BUG-03 assignment requirement flag", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+
+  it("throws ASSIGNMENT_REQUIRED when the env flag is enabled and no assignmentId is given", async () => {
+    const original = env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT;
+    env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT = true;
+
+    try {
+      vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+        _id: examId,
+        status: "published",
+      } as never);
+
+      await expect(startAttempt(studentId, examId)).rejects.toThrow(BadRequestError);
+    } finally {
+      env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT = original;
+    }
+  });
+
+  it("allows starting without assignmentId when the flag is disabled (default)", async () => {
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      status: "published",
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          toObject: () => ({ _id: examId, title: "T", sections: [] }),
+        }),
+      }),
+    } as never);
+    vi.spyOn(AttemptModel, "findOne").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(examId),
+      examId: new mongoose.Types.ObjectId(examId),
+      startedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+      status: "in_progress",
+    } as never);
+
+    const result = await startAttempt(studentId, examId);
+    expect(result.attemptId).toBeDefined();
+  });
+});
+
+describe("BUG-05 expired attempt result", () => {
+  const attemptId = new mongoose.Types.ObjectId();
+  const studentOwnerId = new mongoose.Types.ObjectId();
+
+  it("returns the result of an expired (auto-submitted) attempt", async () => {
+    const examId = new mongoose.Types.ObjectId();
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "expired",
+      examId: { _id: examId, createdBy: new mongoose.Types.ObjectId() },
+      assignmentId: null,
+      answers: [],
+      scores: { overallBand: 6 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          toObject: () => ({ _id: examId, title: "T", sections: [] }),
+        }),
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValueOnce(null);
+
+    const result = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+
+    expect(result.status).toBe("expired");
+    expect(result.scores.overallBand).toBe(6);
+  });
+
+  it("masks scores for students when showScoreAfterSubmit is false", async () => {
+    const examId = new mongoose.Types.ObjectId();
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: examId, createdBy: new mongoose.Types.ObjectId() },
+      assignmentId: { _id: new mongoose.Types.ObjectId(), showScoreAfterSubmit: false },
+      answers: [],
+      scores: { overallBand: 7 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue(mockAttempt),
+      }),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          toObject: () => ({ _id: examId, title: "T", sections: [] }),
+        }),
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
+
+    const studentResult = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+    expect(studentResult.scores.overallBand).toBeUndefined();
+
+    const adminResult = await getAttemptResult(attemptId.toString(), {
+      id: new mongoose.Types.ObjectId().toString(),
+      role: "admin",
+    });
+    expect(adminResult.scores.overallBand).toBe(7);
+  });
+});
+
+describe("question shuffle helpers", () => {
+  it("is deterministic for the same seed and preserves all ids", () => {
+    const ids = ["a", "b", "c", "d", "e"];
+
+    const first = shuffleQuestionIds(ids, 42);
+    const second = shuffleQuestionIds(ids, 42);
+
+    expect(first).toEqual(second);
+    expect([...first].sort()).toEqual([...ids].sort());
+  });
+
+  it("reorders candidate exam questions according to a stored order", () => {
+    const exam: CandidateExam = {
+      id: "exam-1",
+      title: "Mock",
+      sections: [
+        {
+          skill: "reading",
+          part: 1,
+          title: "S1",
+          instructions: null,
+          passageText: null,
+          mediaIds: [],
+          media: [],
+          questions: [
+            { id: "q1", prompt: "1", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
+            { id: "q2", prompt: "2", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
+            { id: "q3", prompt: "3", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
+          ],
+        },
+      ],
+    };
+
+    expect(collectCandidateQuestionIds(exam)).toEqual(["q1", "q2", "q3"]);
+
+    const reordered = applyQuestionOrder(exam, ["q3", "q1", "q2"]);
+    expect(reordered.sections[0].questions.map((question) => question.id)).toEqual([
+      "q3",
+      "q1",
+      "q2",
+    ]);
+    expect(applyQuestionOrder(exam, [])).toBe(exam);
   });
 });

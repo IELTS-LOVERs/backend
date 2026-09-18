@@ -73,6 +73,24 @@ describe("WritingReviewModel", () => {
     expect(error?.errors.overallWritingScore).toBeDefined();
   });
 
+  it("rejects scores that are not multiples of 0.5", async () => {
+    let error: ValidationError | undefined;
+    try {
+      await new WritingReviewModel({
+        ...baseFields(),
+        task1: { score: 6.3 },
+        task2: { score: 7 },
+        overallWritingScore: 6.8,
+      }).validate();
+    } catch (err) {
+      error = err as ValidationError;
+    }
+
+    expect(error?.errors["task1.score"]).toBeDefined();
+    expect(error?.errors.overallWritingScore).toBeDefined();
+    expect(error?.errors["task2.score"]).toBeUndefined();
+  });
+
   it("accepts a valid review when optional comments are omitted", async () => {
     const doc = new WritingReviewModel({
       ...baseFields(),

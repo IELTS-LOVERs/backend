@@ -12,6 +12,9 @@ describe("AssignmentModel", () => {
     expect(AssignmentModel.schema.path("assignedAt")).toBeDefined();
     expect(AssignmentModel.schema.path("deadline")).toBeDefined();
     expect(AssignmentModel.schema.path("status")).toBeDefined();
+    expect(AssignmentModel.schema.path("maxAttempts")).toBeDefined();
+    expect(AssignmentModel.schema.path("shuffleQuestions")).toBeDefined();
+    expect(AssignmentModel.schema.path("showScoreAfterSubmit")).toBeDefined();
   });
 
   it("requires examId and teacherId", async () => {
@@ -35,5 +38,17 @@ describe("AssignmentModel", () => {
     await expect(doc.validate()).resolves.toBeUndefined();
     expect(doc.status).toBe("active");
     expect(doc.assignedAt).toBeInstanceOf(Date);
+  });
+
+  it("applies defaults for the attempt policy", async () => {
+    const doc = new AssignmentModel({
+      examId: new mongoose.Types.ObjectId(),
+      teacherId: new mongoose.Types.ObjectId(),
+    });
+
+    await expect(doc.validate()).resolves.toBeUndefined();
+    expect(doc.maxAttempts).toBe(1);
+    expect(doc.shuffleQuestions).toBe(false);
+    expect(doc.showScoreAfterSubmit).toBe(true);
   });
 });

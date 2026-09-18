@@ -13,6 +13,7 @@ describe("UserModel", () => {
     expect(UserModel.schema.path("targetBand")).toBeDefined();
     expect(UserModel.schema.path("avatarMediaId")).toBeDefined();
     expect(UserModel.schema.path("status")).toBeDefined();
+    expect(UserModel.schema.path("tokenVersion")).toBeDefined();
   });
 
   it("requires email, passwordHash, and fullName", async () => {
@@ -38,6 +39,7 @@ describe("UserModel", () => {
     await expect(doc.validate()).resolves.toBeUndefined();
     expect(doc.role).toBe("student");
     expect(doc.status).toBe("active");
+    expect(doc.tokenVersion).toBe(0);
   });
 
   it("rejects invalid role or status enum values", async () => {

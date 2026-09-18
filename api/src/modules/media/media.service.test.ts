@@ -1,10 +1,13 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
-import { ForbiddenError } from "../../common/errors/AppError.js";
+import { BadRequestError, ForbiddenError } from "../../common/errors/AppError.js";
 import { minioClient } from "../../config/minio.js";
+import { ExamModel } from "../exams/exam.model.js";
+import { QuestionModel } from "../questions/question.model.js";
 import { MediaModel } from "./media.model.js";
 import {
   buildMediaObjectKey,
+  confirmUpload,
   deleteMedia,
   listMedia,
   sanitizeFilename,
@@ -106,6 +109,29 @@ describe("listMedia", () => {
   });
 });
 
+describe("confirmUpload", () => {
+  const userId = new mongoose.Types.ObjectId().toString();
+  const mediaId = new mongoose.Types.ObjectId().toString();
+
+  it("marks a pending media record as confirmed after statObject succeeds", async () => {
+    const media = {
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(userId),
+      key: "uploads/audio/test.mp3",
+      status: "pending" as const,
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce(media as never);
+    vi.spyOn(minioClient, "statObject").mockResolvedValueOnce({} as never);
+
+    const result = await confirmUpload(mediaId, userId);
+
+    expect(result.status).toBe("confirmed");
+    expect(media.status).toBe("confirmed");
+    expect(media.save).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("deleteMedia", () => {
   const teacherId = new mongoose.Types.ObjectId().toString();
   const strangerId = new mongoose.Types.ObjectId().toString();
@@ -127,11 +153,45 @@ describe("deleteMedia", () => {
       uploadedBy: new mongoose.Types.ObjectId(teacherId),
       key: "test.mp3",
     } as never);
+    vi.spyOn(QuestionModel, "exists").mockResolvedValue(null);
+    vi.spyOn(ExamModel, "exists").mockResolvedValue(null);
     vi.spyOn(minioClient, "removeObject").mockResolvedValueOnce(undefined as never);
     const deleteSpy = vi.spyOn(MediaModel, "findByIdAndDelete").mockResolvedValueOnce({} as never);
 
     await deleteMedia(mediaId, teacherId, "teacher");
     expect(minioClient.removeObject).toHaveBeenCalled();
     expect(deleteSpy).toHaveBeenCalledWith(mediaId);
+  });
+
+  it("blocks deletion when the media is referenced by a question", async () => {
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce({
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      key: "test.mp3",
+    } as never);
+    vi.spyOn(QuestionModel, "exists").mockResolvedValue({
+      _id: new mongoose.Types.ObjectId(),
+    });
+    vi.spyOn(ExamModel, "exists").mockResolvedValue(null);
+    const removeSpy = vi.spyOn(minioClient, "removeObject");
+    const deleteSpy = vi.spyOn(MediaModel, "findByIdAndDelete");
+
+    await expect(deleteMedia(mediaId, teacherId, "teacher")).rejects.toThrow(BadRequestError);
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it("blocks deletion when the media is referenced by an exam section", async () => {
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce({
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      key: "test.mp3",
+    } as never);
+    vi.spyOn(QuestionModel, "exists").mockResolvedValue(null);
+    vi.spyOn(ExamModel, "exists").mockResolvedValue({
+      _id: new mongoose.Types.ObjectId(),
+    });
+
+    await expect(deleteMedia(mediaId, teacherId, "teacher")).rejects.toThrow(/đang được/);
   });
 });

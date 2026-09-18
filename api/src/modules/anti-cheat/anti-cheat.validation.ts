@@ -9,6 +9,7 @@ export const EXAM_EVENT_TYPES = [
   "PASTE",
   "CUT",
   "CONTEXT_MENU",
+  "INTERRUPTION",
 ] as const;
 
 export const LogExamEventSchema = z.object({
@@ -22,3 +23,11 @@ export const LogExamEventSchema = z.object({
 
 export type LogExamEventBody = z.infer<typeof LogExamEventSchema>["body"];
 export type ExamEventTypeInput = LogExamEventBody["type"];
+
+export const SuspiciousReportSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().int().positive().max(100).default(50),
+  }),
+});
+
+export type SuspiciousReportQuery = z.infer<typeof SuspiciousReportSchema>["query"];

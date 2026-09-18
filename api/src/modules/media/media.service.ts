@@ -7,6 +7,9 @@ import {
 } from "../../common/errors/AppError.js";
 import { env } from "../../config/env.js";
 import { minioClient } from "../../config/minio.js";
+import { logger } from "../../common/utils/logger.js";
+import { ExamModel } from "../exams/exam.model.js";
+import { QuestionModel } from "../questions/question.model.js";
 import { MediaModel, type MediaType } from "./media.model.js";
 import type { ListMediaQuery, PresignUploadBody } from "./media.validation.js";
 
@@ -32,6 +35,7 @@ export interface MediaListItem {
   mimeType: string;
   size: number;
   type: MediaType;
+  status: "pending" | "confirmed";
   url: string;
   uploadedBy: string;
   createdAt: Date;
@@ -85,6 +89,8 @@ export async function createPresignedUpload(
     PRESIGN_EXPIRES_IN_SECONDS
   );
 
+  logger.info("media.presigned", { mediaId: media._id.toString(), userId, key });
+
   return {
     mediaId: media._id.toString(),
     uploadUrl,
@@ -118,6 +124,11 @@ export async function confirmUpload(
       "File chưa được upload lên MinIO."
     );
   }
+
+  media.status = "confirmed";
+  await media.save();
+
+  logger.info("media.confirmed", { mediaId, userId, key: media.key });
 
   return { id: mediaId, status: "confirmed" };
 }
@@ -158,6 +169,7 @@ export async function listMedia(
       mimeType: item.mimeType,
       size: item.size,
       type: item.type,
+      status: item.status,
       url: `${env.PUBLIC_MEDIA_URL}/${item.key}`,
       uploadedBy: item.uploadedBy.toString(),
       createdAt: item.createdAt,
@@ -185,6 +197,18 @@ export async function deleteMedia(
     throw new ForbiddenError(
       "FORBIDDEN",
       "Người dùng không đủ quyền thực hiện hành động."
+    );
+  }
+
+  const [usedByQuestion, usedByExam] = await Promise.all([
+    QuestionModel.exists({ mediaIds: media._id }),
+    ExamModel.exists({ "sections.mediaIds": media._id }),
+  ]);
+
+  if (usedByQuestion || usedByExam) {
+    throw new BadRequestError(
+      "MEDIA_IN_USE",
+      "Không thể xóa media đang được câu hỏi hoặc đề thi sử dụng."
     );
   }
 

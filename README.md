@@ -51,7 +51,7 @@ The IELTS Online Platform provides an end-to-end examination engine simulating r
 2. **Server-Authoritative Timing:** Test duration is tracked and verified strictly on the server (`startedAt`, `expiresAt`). Clients cannot dictate remaining time. Submissions and autosaves beyond the allotted duration plus a 15-second network grace window are rejected.
 3. **Zero Media Proxying:** Express does not handle heavy binary payloads (audio/images). Clients request presigned PUT URLs and upload directly to MinIO S3 object storage.
 4. **Idempotent Autosave:** Incremental answer persistence debounced at regular intervals ensures zero data loss upon page reloads or network drops.
-5. **Data Projection & Anti-Leak Sanitization:** Candidate-facing endpoints (`POST /api/attempts`, `GET /api/attempts/:id`) strip `acceptedAnswers` and `explanation` fields from all question structures. Answers are only made accessible after an attempt is marked as submitted and fetched via the dedicated result endpoint.
+5. **Data Projection & Anti-Leak Sanitization:** Candidate-facing endpoints (`POST /api/attempts`, `GET /api/attempts/:id`, `GET /api/exams/:id` for students) strip `acceptedAnswers` and `explanation` fields from all question structures. Answers are only made accessible after an attempt is marked as submitted/expired and fetched via the dedicated result endpoint.
 6. **Strict Validation & Type Safety:** All incoming requests (body, params, query) are validated at the middleware layer using Zod schemas with TypeScript strict typing enabled throughout the entire pipeline.
 
 ---
@@ -148,6 +148,7 @@ Key environment variables:
 | `MINIO_BUCKET` | Default storage bucket | `ielts-media` |
 | `PUBLIC_MEDIA_URL` | Public base URL for media assets | `http://localhost:9000/ielts-media` |
 | `EXAM_GRACE_PERIOD_SECONDS`| Network delay buffer for submit/autosave | `15` |
+| `REQUIRE_ASSIGNMENT_FOR_ATTEMPT`| Require a valid assignment before starting an attempt | `false` |
 | `ANTI_CHEAT_TAB_SWITCH_THRESHOLD`| Max tab switches before flagging | `5` |
 | `ANTI_CHEAT_FULLSCREEN_EXIT_THRESHOLD`| Max fullscreen exits before flagging | `2` |
 | `ANTI_CHEAT_PASTE_THRESHOLD`| Max paste occurrences before flagging | `3` |
@@ -233,6 +234,52 @@ cd backend/api
 npm run smoke
 ```
 
+### 3. Periodic Jobs
+
+The platform ships two idempotent maintenance scripts that can be scheduled with `cron`, a systemd timer, or any scheduler:
+
+```bash
+cd backend/api
+
+# Auto-submit and auto-grade attempts that passed expiresAt + grace (sets status "expired")
+npm run auto-finalize
+
+# Delete pending media records (and MinIO objects) never confirmed within 24h
+npm run cleanup-media
+```
+
+Example crontab (every 5 minutes / hourly):
+
+```cron
+*/5 * * * * cd /srv/ielts/backend/api && npm run auto-finalize >> /var/log/ielts-auto-finalize.log 2>&1
+0 * * * * cd /srv/ielts/backend/api && npm run cleanup-media >> /var/log/ielts-cleanup-media.log 2>&1
+```
+
+### 4. MongoDB & MinIO Backup
+
+The compose file provides an optional scheduled MongoDB backup container based on `mongodump`:
+
+```bash
+# Start API + MongoDB + MinIO + periodic backup (24h interval, 14-day retention)
+docker compose --profile backup up -d
+
+# Backups are stored in the mongo_backup_data volume as ielts-YYYYmmdd-HHMMSS.archive.gz
+docker compose exec mongo-backup ls -lh /backups
+```
+
+Restore a backup archive:
+
+```bash
+docker compose exec -T mongodb mongorestore --uri="mongodb://localhost:27017/ielts_db" --archive --gzip < backups/ielts-YYYYmmdd-HHMMSS.archive.gz
+```
+
+For MinIO media, mirror the bucket to an external disk or S3 endpoint (adjust credentials/alias):
+
+```bash
+mc alias set ielts http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+mc mirror --overwrite ielts/ielts-media /backups/minio/ielts-media
+```
+
 ---
 
 ## API Overview & Endpoints Reference
@@ -279,6 +326,9 @@ All responses strictly follow the standardized envelope convention.
 | POST | `/api/auth/logout` | Public (Cookie) | Clear refresh token cookie |
 | POST | `/api/auth/change-password` | Authenticated | Change current user password |
 | GET | `/api/users/me` | Authenticated | Retrieve current user profile |
+| GET | `/api/users` | Admin | List users with role/status/search filters |
+| POST | `/api/users` | Admin | Create a teacher or admin account |
+| PATCH | `/api/users/:id/status` | Admin | Activate, deactivate or suspend a user |
 | POST | `/api/users/:id/reset-password` | Admin | Manually reset a user password |
 
 ---
@@ -301,8 +351,8 @@ All responses strictly follow the standardized envelope convention.
 | Method | Endpoint | Access | Description |
 |---|---|---|---|
 | POST | `/api/questions` | Teacher, Admin | Create a new question item |
-| GET | `/api/questions` | Teacher, Admin | Paginated question search with filters |
-| GET | `/api/questions/:id` | Teacher, Admin | Retrieve question item details |
+| GET | `/api/questions` | Teacher, Admin | Paginated question search (defaults to own questions, `?scope=all` for the shared bank) |
+| GET | `/api/questions/:id` | Teacher, Admin | Retrieve question item details (owner or `?scope=all`) |
 | PUT | `/api/questions/:id` | Teacher, Admin (Owner) | Update an existing question |
 | DELETE | `/api/questions/:id` | Teacher, Admin (Owner) | Delete a question item |
 
@@ -329,6 +379,7 @@ All responses strictly follow the standardized envelope convention.
 |---|---|---|---|
 | POST | `/api/assignments` | Teacher, Admin | Assign published exam to classroom or individual student |
 | GET | `/api/assignments/my` | Student | List assignments with current progress/submission status |
+| GET | `/api/assignments/:id/export` | Teacher, Admin (Owner) | Download a CSV score report for the assignment |
 
 ---
 
@@ -367,7 +418,16 @@ All responses strictly follow the standardized envelope convention.
 
 | Method | Endpoint | Access | Description |
 |---|---|---|---|
-| POST | `/api/anti-cheat/events` | Student | Record client telemetry (`TAB_SWITCH`, `FULLSCREEN_EXIT`, `PASTE`) |
+| POST | `/api/anti-cheat/events` | Student (Rate Limited) | Record client telemetry (`TAB_SWITCH`, `FULLSCREEN_EXIT`, `PASTE`, `INTERRUPTION`, ...) |
+| GET | `/api/anti-cheat/suspicious` | Teacher, Admin | List suspicious attempts (owned exams/assignments) with per-type event counts |
+
+### 10. Analytics
+
+| Method | Endpoint | Access | Description |
+|---|---|---|---|
+| GET | `/api/analytics/exams/:id` | Teacher, Admin (Owner) | Accuracy per Section/Part, hardest questions, band distribution |
+| GET | `/api/analytics/classes/:id` | Teacher, Admin (Owner) | Per-student and class-wide Listening/Reading/Writing/Overall averages |
+| GET | `/api/analytics/student/progress` | Authenticated | Score timeline; students are scoped to their own data |
 
 ---
 

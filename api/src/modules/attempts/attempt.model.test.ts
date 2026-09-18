@@ -25,6 +25,7 @@ describe("AttemptModel", () => {
     expect(AttemptModel.schema.path("scores.writingBand")).toBeDefined();
     expect(AttemptModel.schema.path("scores.overallBand")).toBeDefined();
     expect(AttemptModel.schema.path("suspicious")).toBeDefined();
+    expect(AttemptModel.schema.path("questionOrder")).toBeDefined();
   });
 
   it("requires examId, studentId and expiresAt", async () => {
@@ -52,6 +53,7 @@ describe("AttemptModel", () => {
     expect(doc.status).toBe("in_progress");
     expect(doc.answers).toHaveLength(0);
     expect(doc.suspicious).toBe(false);
+    expect(doc.questionOrder).toHaveLength(0);
     expect(doc.scores.listeningRaw).toBeUndefined();
     expect(doc.scores.overallBand).toBeUndefined();
   });

@@ -20,9 +20,14 @@ export interface IWritingReview extends mongoose.Document {
   updatedAt: Date;
 }
 
+const halfBandValidator = {
+  validator: (value: number) => Number.isInteger(value * 2),
+  message: "Điểm Writing phải theo bước 0.5.",
+};
+
 const TaskGradeSchema = new Schema<ITaskGrade>(
   {
-    score: { type: Number, required: true, min: 0, max: 9.0 },
+    score: { type: Number, required: true, min: 0, max: 9.0, validate: halfBandValidator },
     comment: { type: String },
   },
   { _id: false }
@@ -35,7 +40,13 @@ const WritingReviewSchema = new Schema<IWritingReview>(
     teacherId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     task1: { type: TaskGradeSchema, required: false },
     task2: { type: TaskGradeSchema, required: false },
-    overallWritingScore: { type: Number, required: true, min: 0, max: 9.0 },
+    overallWritingScore: {
+      type: Number,
+      required: true,
+      min: 0,
+      max: 9.0,
+      validate: halfBandValidator,
+    },
     generalFeedback: { type: String },
   },
   { timestamps: true, versionKey: false }

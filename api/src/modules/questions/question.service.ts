@@ -78,20 +78,31 @@ export async function create(
   return serializeQuestion(question);
 }
 
-export async function list(filters: ListQuestionsFilters): Promise<{
+export async function list(
+  filters: ListQuestionsFilters,
+  userId?: string,
+  role?: string
+): Promise<{
   questions: SerializedQuestion[];
   page: number;
   limit: number;
   total: number;
   totalPages: number;
 }> {
-  const { page, limit, skill, part, type, createdBy } = filters;
+  const { page, limit, skill, part, type, createdBy, scope } = filters;
   const query: QuestionFilter = {};
 
   if (skill) query.skill = skill;
   if (part !== undefined) query.part = part;
   if (type) query.type = type as IQuestion["type"];
-  if (createdBy) query.createdBy = createdBy;
+
+  if (scope === "all") {
+    if (createdBy) query.createdBy = createdBy;
+  } else if (role !== "admin" && userId) {
+    query.createdBy = userId;
+  } else if (createdBy) {
+    query.createdBy = createdBy;
+  }
 
   if (filters.search && filters.search.trim().length > 0) {
     const searchRegex = new RegExp(filters.search.trim(), "i");
@@ -115,11 +126,25 @@ export async function list(filters: ListQuestionsFilters): Promise<{
   };
 }
 
-export async function getById(id: string): Promise<SerializedQuestion> {
+export async function getById(
+  id: string,
+  userId?: string,
+  role?: string,
+  scope?: "own" | "all"
+): Promise<SerializedQuestion> {
   const question = await QuestionModel.findById(id);
 
   if (!question) {
     throw new NotFoundError("Câu hỏi không tồn tại.");
+  }
+
+  if (
+    scope !== "all" &&
+    role !== "admin" &&
+    userId &&
+    question.createdBy.toString() !== userId
+  ) {
+    throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 
   return serializeQuestion(question);

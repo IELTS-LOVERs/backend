@@ -6,6 +6,7 @@ import { ClassModel } from "../classes/class.model.js";
 import { AssignmentModel } from "./assignment.model.js";
 import {
   deleteAssignment,
+  exportAssignmentCsv,
   getAssignmentById,
   getAssignmentProgress,
   getAssignmentsForTeacher,
@@ -517,5 +518,62 @@ describe("deleteAssignment", () => {
 
     expect(result.message).toBe("Đã xóa bài tập thành công");
     expect(deleteSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("exportAssignmentCsv", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const assignmentId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+  const classId = new mongoose.Types.ObjectId();
+  const studentId = new mongoose.Types.ObjectId();
+
+  it("renders a CSV row with scores and suspicious flag", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockReturnValue({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({
+          _id: assignmentId,
+          teacherId,
+          examId: { _id: examId, title: "Mock Exam" },
+          classId: { _id: classId, name: "Class 1", code: "CLS1" },
+          deadline: new Date("2026-10-01"),
+        }),
+      }),
+    } as never);
+
+    vi.spyOn(ClassModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue({
+        students: [
+          { _id: studentId, fullName: "Student One", email: "s1@test.com" },
+        ],
+      }),
+    } as never);
+
+    vi.spyOn(AttemptModel, "find").mockResolvedValue([
+      {
+        studentId,
+        examId,
+        assignmentId,
+        status: "submitted",
+        suspicious: true,
+        scores: { listeningBand: 6.5, overallBand: 6.5 },
+        submittedAt: new Date("2026-09-18T00:00:00Z"),
+      },
+    ] as never);
+
+    const csv = await exportAssignmentCsv(
+      assignmentId.toString(),
+      teacherId.toString(),
+      "teacher"
+    );
+    const lines = csv.split("\n");
+
+    expect(lines[0]).toBe(
+      "Student,Email,Status,Listening,Reading,Writing,Overall,SubmittedAt,Suspicious"
+    );
+    expect(lines[1]).toContain("Student One");
+    expect(lines[1]).toContain("s1@test.com");
+    expect(lines[1]).toContain("6.5");
+    expect(lines[1].endsWith(",yes")).toBe(true);
   });
 });

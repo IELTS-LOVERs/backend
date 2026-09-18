@@ -7,10 +7,12 @@ import {
   NotFoundError,
 } from "../../common/errors/AppError.js";
 import { calculateOverallBand } from "../../common/utils/ielts-calculator.js";
+import { logger } from "../../common/utils/logger.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
-import { AssignmentModel } from "../assignments/assignment.model.js";
+import { AssignmentModel, type IAssignment } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel, type IExam } from "../exams/exam.model.js";
+import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
 import "../questions/question.model.js";
 import "../media/media.model.js";
@@ -222,6 +224,48 @@ export function computeRemainingSeconds(
   return Math.max(0, Math.floor((expiresAt.getTime() - now) / 1000));
 }
 
+export function collectCandidateQuestionIds(exam: CandidateExam): string[] {
+  return exam.sections.flatMap((section) => section.questions.map((question) => question.id));
+}
+
+export function shuffleQuestionIds(questionIds: string[], seed: number): string[] {
+  const result = [...questionIds];
+  let state = seed >>> 0 || 1;
+
+  const random = (): number => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+
+  return result;
+}
+
+export function applyQuestionOrder(exam: CandidateExam, order: string[]): CandidateExam {
+  if (order.length === 0) return exam;
+
+  const position = new Map(order.map((id, index) => [id, index]));
+
+  return {
+    ...exam,
+    sections: exam.sections.map((section) => ({
+      ...section,
+      questions: [...section.questions].sort((a, b) => {
+        const positionA = position.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+        const positionB = position.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+        return positionA - positionB;
+      }),
+    })),
+  };
+}
+
 /**
  * Whitelist-serializes a populated exam for the candidate, guaranteeing that
  * `acceptedAnswers` and `explanation` can never leak. `.toObject()` is still
@@ -413,6 +457,15 @@ export async function startAttempt(
     throw new BadRequestError("EXAM_CLOSED", "Đề thi đã kết thúc thời gian làm bài.");
   }
 
+  if (env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT && !assignmentId) {
+    throw new BadRequestError(
+      "ASSIGNMENT_REQUIRED",
+      "Cần bắt đầu bài thi từ bài tập được giao."
+    );
+  }
+
+  let assignmentDoc: IAssignment | null = null;
+
   if (assignmentId) {
     const assignment = await AssignmentModel.findById(assignmentId);
 
@@ -424,16 +477,16 @@ export async function startAttempt(
       throw new BadRequestError("VALIDATION_ERROR", "Bài tập không còn hiệu lực.");
     }
 
-    const submittedAttempt = await AttemptModel.findOne({
+    const completedAttempts = await AttemptModel.countDocuments({
       studentId,
       assignmentId,
-      status: "submitted",
+      status: { $in: ["submitted", "expired"] },
     });
 
-    if (submittedAttempt) {
+    if (completedAttempts >= (assignment.maxAttempts ?? 1)) {
       throw new BadRequestError(
-        "ASSIGNMENT_ALREADY_SUBMITTED",
-        "Bạn đã hoàn thành bài tập này, không thể làm lại."
+        "ASSIGNMENT_MAX_ATTEMPTS_REACHED",
+        "Bạn đã hoàn thành số lần làm bài tối đa của bài tập này."
       );
     }
 
@@ -461,6 +514,8 @@ export async function startAttempt(
         "Đã quá hạn nộp bài tập."
       );
     }
+
+    assignmentDoc = assignment;
   }
 
   const populatedExam = await loadPopulatedExam(examId);
@@ -473,11 +528,17 @@ export async function startAttempt(
   });
 
   if (existingAttempt) {
-    return serializeStartResult(existingAttempt, candidateExam);
+    return serializeStartResult(
+      existingAttempt,
+      applyQuestionOrder(candidateExam, existingAttempt.questionOrder ?? [])
+    );
   }
 
   const startedAt = new Date();
   const expiresAt = new Date(startedAt.getTime() + exam.durationMinutes * 60 * 1000);
+  const questionOrder = assignmentDoc?.shuffleQuestions
+    ? shuffleQuestionIds(collectCandidateQuestionIds(candidateExam), startedAt.getTime())
+    : [];
 
   try {
     const attempt = await AttemptModel.create({
@@ -489,9 +550,10 @@ export async function startAttempt(
       status: "in_progress",
       answers: [],
       suspicious: false,
+      questionOrder,
     });
 
-    return serializeStartResult(attempt, candidateExam);
+    return serializeStartResult(attempt, applyQuestionOrder(candidateExam, questionOrder));
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       const concurrentAttempt = await AttemptModel.findOne({
@@ -501,7 +563,10 @@ export async function startAttempt(
       });
 
       if (concurrentAttempt) {
-        return serializeStartResult(concurrentAttempt, candidateExam);
+        return serializeStartResult(
+          concurrentAttempt,
+          applyQuestionOrder(candidateExam, concurrentAttempt.questionOrder ?? [])
+        );
       }
     }
 
@@ -512,7 +577,8 @@ export async function startAttempt(
 export async function finalizeAttempt(
   attempt: IAttempt,
   submittedAt: Date,
-  message?: string
+  message?: string,
+  targetStatus: "submitted" | "expired" = "submitted"
 ): Promise<SubmitAttemptResult> {
   const populatedExam = await loadPopulatedExam(attempt.examId);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
@@ -553,7 +619,7 @@ export async function finalizeAttempt(
     { _id: attempt._id, studentId: attempt.studentId, status: "in_progress" },
     {
       $set: {
-        status: "submitted",
+        status: targetStatus,
         submittedAt,
         scores,
       },
@@ -563,8 +629,8 @@ export async function finalizeAttempt(
 
   if (!updatedAttempt) {
     const current = await AttemptModel.findById(attempt._id);
-    if (current && current.status === "submitted") {
-      attempt.status = "submitted";
+    if (current && (current.status === "submitted" || current.status === "expired")) {
+      attempt.status = current.status;
       attempt.submittedAt = current.submittedAt;
       attempt.scores = current.scores;
       return {
@@ -578,9 +644,16 @@ export async function finalizeAttempt(
     throw new BadRequestError("VALIDATION_ERROR", "Không thể nộp bài thi.");
   }
 
-  attempt.status = "submitted";
+  attempt.status = targetStatus;
   attempt.submittedAt = submittedAt;
   attempt.scores = updatedAttempt.scores;
+
+  logger.info("attempt.finalized", {
+    attemptId: updatedAttempt._id.toString(),
+    studentId: attempt.studentId.toString(),
+    status: targetStatus,
+    expired: targetStatus === "expired",
+  });
 
   return {
     attemptId: updatedAttempt._id.toString(),
@@ -601,18 +674,26 @@ export async function getAttemptForRecovery(
   const remainingSeconds = computeRemainingSeconds(attempt.expiresAt);
 
   if (remainingSeconds <= 0 && attempt.status === "in_progress") {
-    await finalizeAttempt(attempt, attempt.expiresAt);
+    await finalizeAttempt(
+      attempt,
+      attempt.expiresAt,
+      "Bài thi đã được tự động nộp do hết thời gian làm bài.",
+      "expired"
+    );
   }
 
   return {
     attemptId: attempt._id.toString(),
     status: attempt.status,
-    remainingSeconds: attempt.status === "submitted" ? 0 : remainingSeconds,
+    remainingSeconds: attempt.status === "in_progress" ? remainingSeconds : 0,
     answers: attempt.answers.map((answer) => ({
       questionId: answer.questionId.toString(),
       value: answer.value,
     })),
-    exam: buildCandidateExam(populatedExam),
+    exam: applyQuestionOrder(
+      buildCandidateExam(populatedExam),
+      attempt.questionOrder ?? []
+    ),
   };
 }
 
@@ -679,7 +760,8 @@ export async function submitAttempt(
     return finalizeAttempt(
       attempt,
       attempt.expiresAt,
-      "Bài thi đã được tự động nộp do hết thời gian làm bài."
+      "Bài thi đã được tự động nộp do hết thời gian làm bài.",
+      "expired"
     );
   }
 
@@ -700,27 +782,37 @@ export async function getAttemptResult(
   attemptId: string,
   currentUser: { id: string; role: string }
 ): Promise<AttemptResult> {
-  const attempt = await AttemptModel.findById(attemptId);
+  const attempt = await AttemptModel.findById(attemptId)
+    .populate("examId", "createdBy")
+    .populate("assignmentId", "teacherId showScoreAfterSubmit");
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
-  if (
-    currentUser.role === "student" &&
-    attempt.studentId.toString() !== currentUser.id
-  ) {
-    throw new ForbiddenError(
-      "ATTEMPT_NOT_OWNED",
-      "Học sinh không có quyền truy cập bài làm này."
-    );
+  if (currentUser.role === "student") {
+    if (attempt.studentId.toString() !== currentUser.id) {
+      throw new ForbiddenError(
+        "ATTEMPT_NOT_OWNED",
+        "Học sinh không có quyền truy cập bài làm này."
+      );
+    }
+  } else {
+    assertTeacherOwnsAttempt(attempt, currentUser.id, currentUser.role);
   }
 
-  if (attempt.status !== "submitted") {
+  if (attempt.status !== "submitted" && attempt.status !== "expired") {
     throw new BadRequestError("EXAM_NOT_SUBMITTED", "Bài thi chưa được nộp.");
   }
 
-  const populatedExam = await loadPopulatedExam(attempt.examId);
+  const assignment = attempt.assignmentId as unknown as {
+    showScoreAfterSubmit?: boolean;
+  } | null;
+  const showScore = !(currentUser.role === "student" && assignment?.showScoreAfterSubmit === false);
+
+  const examIdRef =
+    (attempt.examId as unknown as { _id?: Types.ObjectId })._id ?? attempt.examId;
+  const populatedExam = await loadPopulatedExam(examIdRef);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
   const details: ResultQuestionDetail[] = [];
 
@@ -751,7 +843,7 @@ export async function getAttemptResult(
   return {
     attemptId: attempt._id.toString(),
     status: attempt.status,
-    scores: serializeScores(attempt.scores),
+    scores: showScore ? serializeScores(attempt.scores) : {},
     writingReview: review
       ? {
           id: review._id.toString(),

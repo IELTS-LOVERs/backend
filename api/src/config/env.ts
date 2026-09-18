@@ -29,6 +29,7 @@ const EnvSchema = z.object({
   PUBLIC_MEDIA_URL: z.string().min(1, "PUBLIC_MEDIA_URL là bắt buộc"),
 
   EXAM_GRACE_PERIOD_SECONDS: z.coerce.number().int().nonnegative().default(15),
+  REQUIRE_ASSIGNMENT_FOR_ATTEMPT: booleanFromString("false"),
   ANTI_CHEAT_TAB_SWITCH_THRESHOLD: z.coerce.number().int().positive().default(5),
   ANTI_CHEAT_FULLSCREEN_EXIT_THRESHOLD: z.coerce.number().int().positive().default(2),
   ANTI_CHEAT_PASTE_THRESHOLD: z.coerce.number().int().positive().default(3),

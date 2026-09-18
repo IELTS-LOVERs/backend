@@ -21,14 +21,21 @@ export async function createQuestion(req: Request, res: Response): Promise<void>
 }
 
 export async function listQuestions(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
   const query = req.query as unknown as ListQuestionsQuery;
-  const { questions, page, limit, total, totalPages } = await questionService.list(query);
+  const { questions, page, limit, total, totalPages } = await questionService.list(
+    query,
+    user.id,
+    user.role
+  );
   sendSuccess(res, questions, 200, { page, limit, total, totalPages });
 }
 
 export async function getQuestion(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
   const id = req.params.id as string;
-  const question = await questionService.getById(id);
+  const scope = req.query.scope === "all" ? "all" : undefined;
+  const question = await questionService.getById(id, user.id, user.role, scope);
   sendSuccess(res, question);
 }
 

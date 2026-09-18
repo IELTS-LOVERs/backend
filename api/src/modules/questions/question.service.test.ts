@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel, type IQuestion } from "./question.model.js";
-import { assertOwner, list, remove, serializeQuestion } from "./question.service.js";
+import { assertOwner, getById, list, remove, serializeQuestion } from "./question.service.js";
 
 describe("serializeQuestion", () => {
   it("converts ObjectIds to strings and normalizes null fields", () => {
@@ -139,5 +139,86 @@ describe("remove question referential integrity", () => {
     await remove(questionId.toString(), userId.toString(), "teacher");
 
     expect(deleteSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("BUG-08 question bank scope", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+  const otherTeacherId = new mongoose.Types.ObjectId().toString();
+
+  function mockQuestionDoc() {
+    const questionId = new mongoose.Types.ObjectId();
+    const now = new Date();
+
+    return {
+      _id: questionId,
+      skill: "reading",
+      type: "multiple_choice",
+      part: 1,
+      prompt: "Pick one",
+      content: undefined,
+      data: {},
+      acceptedAnswers: ["A"],
+      points: 1,
+      explanation: undefined,
+      mediaIds: [],
+      createdBy: new mongoose.Types.ObjectId(otherTeacherId),
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  it("defaults to own questions for teachers in list", async () => {
+    let capturedQuery: Record<string, unknown> | undefined;
+    const mockFind = {
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(QuestionModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return mockFind as never;
+    });
+    vi.spyOn(QuestionModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await list({ page: 1, limit: 20 }, teacherId, "teacher");
+
+    expect(capturedQuery?.createdBy).toBe(teacherId);
+  });
+
+  it("allows scope=all to query the shared question bank", async () => {
+    let capturedQuery: Record<string, unknown> | undefined;
+    const mockFind = {
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(QuestionModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return mockFind as never;
+    });
+    vi.spyOn(QuestionModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await list({ page: 1, limit: 20, scope: "all" }, teacherId, "teacher");
+
+    expect(capturedQuery?.createdBy).toBeUndefined();
+  });
+
+  it("denies reading another teacher's question by default", async () => {
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(mockQuestionDoc() as never);
+
+    await expect(getById("question-1", teacherId, "teacher")).rejects.toThrow(
+      ForbiddenError
+    );
+  });
+
+  it("allows scope=all and admin to read another teacher's question", async () => {
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(mockQuestionDoc() as never);
+    const shared = await getById("question-1", teacherId, "teacher", "all");
+    expect(shared.prompt).toBe("Pick one");
+
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(mockQuestionDoc() as never);
+    const adminView = await getById("question-1", "admin-1", "admin");
+    expect(adminView.prompt).toBe("Pick one");
   });
 });

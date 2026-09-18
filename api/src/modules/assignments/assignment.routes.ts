@@ -37,6 +37,12 @@ router.get(
   requireRoles("teacher", "admin"),
   assignmentController.getAssignment
 );
+router.get(
+  "/:id/export",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  assignmentController.exportAssignmentReport
+);
 router.patch(
   "/:id",
   authenticate,

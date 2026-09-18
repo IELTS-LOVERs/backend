@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler } from "express";
 import { AppError, BadRequestError } from "../errors/AppError.js";
+import { logger } from "../utils/logger.js";
 import { sendError } from "../utils/response.util.js";
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
@@ -13,6 +14,9 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
-  console.error("[error]", err);
+  logger.error("request.error", {
+    name: err?.name ?? "Error",
+    message: err?.message ?? "Unknown error",
+  });
   sendError(res, new AppError(500, "INTERNAL_SERVER_ERROR", "Lỗi máy chủ không mong muốn."));
 };

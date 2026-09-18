@@ -33,6 +33,7 @@ export interface IAttempt extends mongoose.Document {
   answers: IAttemptAnswer[];
   scores: IAttemptScores;
   suspicious: boolean;
+  questionOrder: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -71,11 +72,13 @@ const AttemptSchema = new Schema<IAttempt>(
       overallBand: { type: Number },
     },
     suspicious: { type: Boolean, default: false },
+    questionOrder: { type: [String], default: [] },
   },
   { timestamps: true, versionKey: false }
 );
 
 AttemptSchema.index({ studentId: 1, examId: 1 });
+AttemptSchema.index({ examId: 1, status: 1 });
 AttemptSchema.index({ assignmentId: 1 });
 AttemptSchema.index({ status: 1, expiresAt: 1 });
 AttemptSchema.index(

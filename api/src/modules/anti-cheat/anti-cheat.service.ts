@@ -10,6 +10,10 @@ import {
   ANTI_CHEAT_TAB_SWITCH_THRESHOLD,
 } from "../../config/constants.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
+import {
+  assertTeacherOwnsAttempt,
+  canTeacherGradeAttempt,
+} from "../grading/grading.service.js";
 import { ExamEventModel } from "./exam-event.model.js";
 import type { LogExamEventBody } from "./anti-cheat.validation.js";
 
@@ -123,6 +127,7 @@ export interface ExamEventSummary {
   cut: number;
   reload: number;
   contextMenu: number;
+  interruption: number;
   suspicious: boolean;
 }
 
@@ -151,6 +156,7 @@ export function summarizeEvents(
   let cut = 0;
   let reload = 0;
   let contextMenu = 0;
+  let interruption = 0;
 
   for (const event of events) {
     switch (event.type) {
@@ -176,6 +182,9 @@ export function summarizeEvents(
       case "CONTEXT_MENU":
         contextMenu += 1;
         break;
+      case "INTERRUPTION":
+        interruption += 1;
+        break;
     }
   }
 
@@ -188,6 +197,7 @@ export function summarizeEvents(
     cut,
     reload,
     contextMenu,
+    interruption,
     suspicious: isSuspicious,
   };
 }
@@ -196,17 +206,23 @@ export async function getAttemptEvents(
   attemptId: string,
   user: { id: string; role: string }
 ): Promise<AttemptEventsResult> {
-  const attempt = await AttemptModel.findById(attemptId);
+  const attempt = await AttemptModel.findById(attemptId)
+    .populate("examId", "createdBy")
+    .populate("assignmentId", "teacherId");
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
-  if (user.role === "student" && attempt.studentId.toString() !== user.id) {
-    throw new ForbiddenError(
-      "ATTEMPT_NOT_OWNED",
-      "Bạn không có quyền truy cập sự kiện của bài thi này."
-    );
+  if (user.role === "student") {
+    if (attempt.studentId.toString() !== user.id) {
+      throw new ForbiddenError(
+        "ATTEMPT_NOT_OWNED",
+        "Bạn không có quyền truy cập sự kiện của bài thi này."
+      );
+    }
+  } else {
+    assertTeacherOwnsAttempt(attempt, user.id, user.role);
   }
 
   const rawEvents = await ExamEventModel.find({ attemptId: attempt._id }).sort({
@@ -228,5 +244,89 @@ export async function getAttemptEvents(
     summary,
     events,
   };
+}
+
+export interface SuspiciousAttemptReport {
+  attemptId: string;
+  studentName: string;
+  examTitle: string;
+  submittedAt: Date | null;
+  totalEvents: number;
+  eventsByType: Record<string, number>;
+}
+
+export interface SuspiciousReportResult {
+  items: SuspiciousAttemptReport[];
+  total: number;
+}
+
+export async function getSuspiciousAttempts(
+  userId: string,
+  role: string,
+  limit: number
+): Promise<SuspiciousReportResult> {
+  const attempts = await AttemptModel.find({ suspicious: true })
+    .populate("examId", "title createdBy")
+    .populate("studentId", "fullName email")
+    .populate("assignmentId", "teacherId")
+    .sort({ updatedAt: -1 })
+    .limit(limit);
+
+  const visible = attempts.filter((attempt) =>
+    canTeacherGradeAttempt(attempt, userId, role)
+  );
+
+  const attemptIds = visible.map((attempt) => attempt._id);
+
+  const eventCounts =
+    attemptIds.length > 0
+      ? await ExamEventModel.aggregate<{
+          _id: { attemptId: mongoose.Types.ObjectId; type: string };
+          count: number;
+        }>([
+          { $match: { attemptId: { $in: attemptIds } } },
+          {
+            $group: {
+              _id: { attemptId: "$attemptId", type: "$type" },
+              count: { $sum: 1 },
+            },
+          },
+        ])
+      : [];
+
+  const countsByAttempt = new Map<string, Record<string, number>>();
+
+  for (const row of eventCounts) {
+    const key = row._id.attemptId.toString();
+    const bucket = countsByAttempt.get(key) ?? {};
+    bucket[row._id.type] = row.count;
+    countsByAttempt.set(key, bucket);
+  }
+
+  const items: SuspiciousAttemptReport[] = visible
+    .map((attempt) => {
+      const exam = attempt.examId as unknown as { title?: string } | null;
+      const student = attempt.studentId as unknown as {
+        fullName?: string;
+        email?: string;
+      } | null;
+      const eventsByType = countsByAttempt.get(attempt._id.toString()) ?? {};
+      const totalEvents = Object.values(eventsByType).reduce(
+        (acc, value) => acc + value,
+        0
+      );
+
+      return {
+        attemptId: attempt._id.toString(),
+        studentName: student?.fullName ?? student?.email ?? "",
+        examTitle: exam?.title ?? "",
+        submittedAt: attempt.submittedAt ?? null,
+        totalEvents,
+        eventsByType,
+      };
+    })
+    .sort((a, b) => b.totalEvents - a.totalEvents);
+
+  return { items, total: items.length };
 }
 

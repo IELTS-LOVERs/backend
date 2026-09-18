@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "seed": "tsx src/scripts/seed.ts",
-    "smoke": "tsx src/scripts/smoke-test.ts"
+    "smoke": "tsx src/scripts/smoke-test.ts",
+    "auto-finalize": "tsx src/scripts/auto-finalize.ts",
+    "cleanup-media": "tsx src/scripts/cleanup-media.ts"
   },
   "engines": {
     "node": ">=20"

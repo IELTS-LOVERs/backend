@@ -1,6 +1,9 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
+import { buildCandidateExam, type CandidateExam } from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
+import { ClassModel } from "../classes/class.model.js";
 import type { SkillType } from "../questions/question.model.js";
 import { ExamModel, type ExamStatus, type IExam, type IExamSection } from "./exam.model.js";
 import type { CreateExamBody, ExamSectionInput, UpdateExamBody } from "./exam.validation.js";
@@ -57,6 +60,11 @@ export interface ExamDetail {
   sections: ExamSectionDetail[];
 }
 
+export interface StudentExamDetail extends CandidateExam {
+  durationMinutes: number;
+  status: ExamStatus;
+}
+
 export interface ListExamsFilters {
   status?: ExamStatus;
   page: number;
@@ -66,6 +74,7 @@ export interface ListExamsFilters {
 interface ExamFilter {
   status?: ExamStatus;
   createdBy?: string;
+  _id?: { $in: Types.ObjectId[] };
 }
 
 interface PopulatedQuestion {
@@ -160,6 +169,18 @@ export async function create(data: CreateExamBody, userId: string): Promise<Exam
   };
 }
 
+export async function getAssignedExamIds(studentId: string): Promise<Types.ObjectId[]> {
+  const classes = await ClassModel.find({ students: studentId }).select("_id");
+  const classIds = classes.map((cls) => cls._id);
+
+  const assignments = await AssignmentModel.find({
+    status: "active",
+    $or: [{ classId: { $in: classIds } }, { studentId }],
+  }).select("examId");
+
+  return assignments.map((assignment) => assignment.examId);
+}
+
 export async function list(
   userId: string,
   role: string,
@@ -176,6 +197,7 @@ export async function list(
 
   if (role === "student") {
     query.status = "published";
+    query._id = { $in: await getAssignedExamIds(userId) };
   } else {
     if (role !== "admin") query.createdBy = userId;
     if (status) query.status = status;
@@ -208,21 +230,27 @@ export async function getById(
   id: string,
   userId?: string,
   role?: string
-): Promise<ExamDetail> {
+): Promise<ExamDetail | StudentExamDetail> {
   const exam = await ExamModel.findById(id).populate("sections.questionIds");
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
   }
 
-  if (role === "student" && exam.status !== "published") {
-    throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
+  if (role === "student") {
+    if (exam.status !== "published") {
+      throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
+    }
+
+    return {
+      ...buildCandidateExam(exam),
+      durationMinutes: exam.durationMinutes,
+      status: exam.status,
+    };
   }
 
-  if (userId && role && role !== "admin" && role !== "student" && exam.status === "draft") {
-    if (exam.createdBy.toString() !== userId) {
-      throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
-    }
+  if (userId && role && role !== "admin" && exam.createdBy.toString() !== userId) {
+    throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 
   const sections: ExamSectionDetail[] = exam.sections.map((section) => {
@@ -292,13 +320,16 @@ export async function remove(id: string, userId: string, role: string): Promise<
 
 export async function clone(
   id: string,
-  userId: string
+  userId: string,
+  role: string
 ): Promise<{ id: string; title: string; status: ExamStatus }> {
   const original = await ExamModel.findById(id);
 
   if (!original) {
     throw new NotFoundError("Đề thi không tồn tại.");
   }
+
+  assertOwnership(original, userId, role);
 
   const cloned = await ExamModel.create({
     title: `[Bản sao] ${original.title}`,

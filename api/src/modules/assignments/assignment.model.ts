@@ -13,6 +13,9 @@ export interface IAssignment extends mongoose.Document {
   assignedAt: Date;
   deadline?: Date;
   status: AssignmentStatus;
+  maxAttempts: number;
+  shuffleQuestions: boolean;
+  showScoreAfterSubmit: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +29,9 @@ const AssignmentSchema = new Schema<IAssignment>(
     assignedAt: { type: Date, default: Date.now },
     deadline: { type: Date },
     status: { type: String, enum: ["active", "archived"], default: "active" },
+    maxAttempts: { type: Number, default: 1, min: 1 },
+    shuffleQuestions: { type: Boolean, default: false },
+    showScoreAfterSubmit: { type: Boolean, default: true },
   },
   { timestamps: true, versionKey: false }
 );

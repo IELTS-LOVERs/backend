@@ -55,7 +55,7 @@ export async function deleteExam(req: Request, res: Response): Promise<void> {
 export async function cloneExam(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;
-  const exam = await examService.clone(id, user.id);
+  const exam = await examService.clone(id, user.id, user.role);
   sendSuccess(res, exam, 201);
 }
 

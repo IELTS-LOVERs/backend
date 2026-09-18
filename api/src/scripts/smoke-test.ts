@@ -281,6 +281,18 @@ async function main(): Promise<void> {
   });
   logStep("Tạo đề thi và publish");
 
+  const studentExamView = await request<{ id: string; sections: unknown[] }>(
+    `/api/exams/${exam.id}`,
+    { token: studentAuth.accessToken }
+  );
+  const studentExamViewJson = JSON.stringify(studentExamView);
+  assert(
+    !studentExamViewJson.includes("acceptedAnswers") &&
+      !studentExamViewJson.includes("explanation"),
+    "Học sinh xem đề không được thấy acceptedAnswers/explanation"
+  );
+  logStep("BUG-01: học sinh xem đề không bị rò rỉ đáp án");
+
   const assignment = await request<AssignmentSummary>("/api/assignments", {
     method: "POST",
     token: teacherAuth.accessToken,
@@ -291,6 +303,15 @@ async function main(): Promise<void> {
     },
   });
   logStep("Giao bài cho lớp");
+
+  const studentExamList = await request<Array<{ id: string }>>("/api/exams", {
+    token: studentAuth.accessToken,
+  });
+  assert(
+    studentExamList.some((item) => item.id === exam.id),
+    "Đề được giao phải xuất hiện trong GET /api/exams của học sinh (BUG-03)"
+  );
+  logStep("BUG-03: học sinh chỉ thấy đề được giao");
 
   const myAssignments = await request<MyAssignment[]>("/api/assignments/my", {
     token: studentAuth.accessToken,
@@ -474,6 +495,67 @@ async function main(): Promise<void> {
     "Teacher dashboard phải trả về thống kê hợp lệ"
   );
   logStep("Truy vấn thành công Dashboard Aggregated Stats (Student & Teacher)");
+
+  const examAnalytics = await request<{
+    totalAttempts: number;
+    sections: Array<{ accuracy: number }>;
+  }>(`/api/analytics/exams/${exam.id}`, {
+    token: teacherAuth.accessToken,
+  });
+  assert(
+    examAnalytics.totalAttempts >= 1,
+    "Analytics đề thi phải ghi nhận ít nhất 1 attempt"
+  );
+  assert(examAnalytics.sections.length > 0, "Analytics đề thi phải có accuracy theo section");
+
+  const classAnalytics = await request<{
+    totalStudents: number;
+    classAverages: { overall: number | null };
+  }>(`/api/analytics/classes/${cls.id}`, {
+    token: teacherAuth.accessToken,
+  });
+  assert(
+    classAnalytics.totalStudents >= 1,
+    "Analytics lớp phải hiển thị danh sách học sinh"
+  );
+
+  const progress = await request<{ points: unknown[] }>(
+    "/api/analytics/student/progress",
+    { token: studentAuth.accessToken }
+  );
+  assert(progress.points.length >= 1, "Tiến độ học sinh phải có ít nhất 1 điểm dữ liệu");
+  logStep("Analytics theo Section/Part, bảng điểm lớp và tiến độ học sinh");
+
+  const suspiciousReport = await request<Array<{ attemptId: string }>>(
+    "/api/anti-cheat/suspicious",
+    { token: teacherAuth.accessToken }
+  );
+  assert(Array.isArray(suspiciousReport), "Báo cáo anti-cheat phải trả về danh sách");
+  logStep("Báo cáo anti-cheat tổng hợp cho giáo viên");
+
+  const csvResponse = await fetch(`${BASE_URL}/api/assignments/${assignment.id}/export`, {
+    headers: { Authorization: `Bearer ${teacherAuth.accessToken}` },
+  });
+  const csvText = await csvResponse.text();
+  assert(csvResponse.ok, "Export CSV phải trả về HTTP 200");
+  assert(
+    csvText.includes("Student,Email,Status"),
+    "CSV phải chứa dòng tiêu đề điểm số"
+  );
+  logStep("Xuất báo cáo CSV điểm của assignment");
+
+  const adminAuth = await request<AuthResult>("/api/auth/login", {
+    method: "POST",
+    body: { email: "admin@ielts.com", password: "Admin@123" },
+  });
+  const adminUsers = await request<Array<{ email: string }>>("/api/users?role=teacher", {
+    token: adminAuth.accessToken,
+  });
+  assert(
+    adminUsers.some((user) => user.email === "teacher@ielts.com"),
+    "Admin phải xem được danh sách người dùng"
+  );
+  logStep("Admin xem danh sách người dùng");
 
   console.log("[smoke] Hoàn tất: toàn bộ luồng end-to-end chạy thành công.");
 }

@@ -16,6 +16,7 @@ export interface IUser extends mongoose.Document {
   targetBand?: number;
   avatarMediaId?: Types.ObjectId;
   status: UserStatus;
+  tokenVersion: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +31,7 @@ const UserSchema = new Schema<IUser>(
     targetBand: { type: Number, min: 0, max: 9.0 },
     avatarMediaId: { type: Schema.Types.ObjectId, ref: "Media" },
     status: { type: String, enum: ["active", "inactive", "suspended"], default: "active" },
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true, versionKey: false }
 );

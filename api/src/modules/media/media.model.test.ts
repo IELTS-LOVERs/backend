@@ -11,6 +11,7 @@ describe("MediaModel", () => {
     expect(MediaModel.schema.path("mimeType")).toBeDefined();
     expect(MediaModel.schema.path("size")).toBeDefined();
     expect(MediaModel.schema.path("type")).toBeDefined();
+    expect(MediaModel.schema.path("status")).toBeDefined();
     expect(MediaModel.schema.path("uploadedBy")).toBeDefined();
   });
 
@@ -63,6 +64,7 @@ describe("MediaModel", () => {
 
     await expect(doc.validate()).resolves.toBeUndefined();
     expect(doc.type).toBe("audio");
+    expect(doc.status).toBe("pending");
   });
 
   it("registers a unique index on key", () => {

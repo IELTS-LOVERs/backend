@@ -23,6 +23,9 @@ export interface AssignmentSummary {
   studentId: string | null;
   deadline: Date | null;
   status: AssignmentStatus;
+  maxAttempts: number;
+  shuffleQuestions: boolean;
+  showScoreAfterSubmit: boolean;
 }
 
 export interface MyAssignment {
@@ -80,6 +83,7 @@ interface AttemptStatusDoc {
   submittedAt?: Date;
   updatedAt?: Date;
   createdAt?: Date;
+  suspicious?: boolean;
 }
 
 function attemptTimestamp(attempt: AttemptStatusDoc): number {
@@ -96,11 +100,16 @@ export function selectAssignmentAttempt<T extends AttemptStatusDoc>(candidates: 
   const inProgress = candidates.find((attempt) => attempt.status === "in_progress");
   if (inProgress) return inProgress;
 
-  const submitted = candidates
-    .filter((attempt) => attempt.status === "submitted")
-    .sort((a, b) => attemptTimestamp(b) - attemptTimestamp(a));
+  const terminal = candidates
+    .filter((attempt) => attempt.status === "submitted" || attempt.status === "expired")
+    .sort((a, b) => {
+      const statusDiff =
+        (a.status === "submitted" ? 1 : 0) - (b.status === "submitted" ? 1 : 0);
+      if (statusDiff !== 0) return -statusDiff;
+      return attemptTimestamp(b) - attemptTimestamp(a);
+    });
 
-  return submitted[0] ?? null;
+  return terminal[0] ?? null;
 }
 
 /**
@@ -178,6 +187,9 @@ export async function create(
     studentId: data.studentId ? new mongoose.Types.ObjectId(data.studentId) : undefined,
     deadline: data.deadline ? new Date(data.deadline) : undefined,
     status: "active",
+    maxAttempts: data.maxAttempts,
+    shuffleQuestions: data.shuffleQuestions,
+    showScoreAfterSubmit: data.showScoreAfterSubmit,
   });
 
   return {
@@ -187,6 +199,9 @@ export async function create(
     studentId: assignment.studentId ? assignment.studentId.toString() : null,
     deadline: assignment.deadline ?? null,
     status: assignment.status,
+    maxAttempts: assignment.maxAttempts,
+    shuffleQuestions: assignment.shuffleQuestions,
+    showScoreAfterSubmit: assignment.showScoreAfterSubmit,
   };
 }
 
@@ -275,6 +290,18 @@ export async function updateAssignment(
 
   if (data.status !== undefined) {
     assignment.status = data.status;
+  }
+
+  if (data.maxAttempts !== undefined) {
+    assignment.maxAttempts = data.maxAttempts;
+  }
+
+  if (data.shuffleQuestions !== undefined) {
+    assignment.shuffleQuestions = data.shuffleQuestions;
+  }
+
+  if (data.showScoreAfterSubmit !== undefined) {
+    assignment.showScoreAfterSubmit = data.showScoreAfterSubmit;
   }
 
   await assignment.save();
@@ -389,17 +416,26 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
         attempt.examId.toString() === entry.examId
     );
     const selected = selectAssignmentAttempt(candidates);
+    const resolvedStatus =
+      statuses.get(entry.id) ?? statuses.get(entry.examId) ?? "not_started";
+    const deadlinePassed = Boolean(
+      entry.deadline && entry.deadline.getTime() < Date.now()
+    );
 
     return {
       id: entry.id,
       examTitle: entry.examTitle,
       durationMinutes: entry.durationMinutes,
       deadline: entry.deadline,
-      submissionStatus: statuses.get(entry.id) ?? statuses.get(entry.examId) ?? "not_started",
+      submissionStatus:
+        resolvedStatus === "not_started" && deadlinePassed ? "expired" : resolvedStatus,
       teacherName: entry.teacherName,
       className: entry.className,
       attemptId: selected ? selected._id.toString() : null,
-      scores: selected && selected.status === "submitted" ? selected.scores : null,
+      scores:
+        selected && (selected.status === "submitted" || selected.status === "expired")
+          ? selected.scores
+          : null,
     };
   });
 }
@@ -421,6 +457,7 @@ export interface AssignmentProgressStudent {
   status: "not_started" | "in_progress" | "submitted" | "expired";
   scores?: IAttemptScores;
   submittedAt?: Date;
+  suspicious?: boolean;
 }
 
 export interface AssignmentProgressResult {
@@ -553,9 +590,12 @@ export async function getAssignmentProgress(
     );
 
     if (studentAttempts.length === 0) {
+      const deadlinePassed = Boolean(
+        assignment.deadline && assignment.deadline.getTime() < Date.now()
+      );
       return {
         student,
-        status: "not_started",
+        status: deadlinePassed ? "expired" : "not_started",
       };
     }
 
@@ -590,6 +630,9 @@ export async function getAssignmentProgress(
     }
     if (bestAttempt.submittedAt) {
       item.submittedAt = bestAttempt.submittedAt;
+    }
+    if (typeof bestAttempt.suspicious === "boolean") {
+      item.suspicious = bestAttempt.suspicious;
     }
 
     return item;
@@ -658,4 +701,56 @@ export async function getAssignmentProgress(
     overview,
     students,
   };
+}
+
+function csvEscape(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+export async function exportAssignmentCsv(
+  assignmentId: string,
+  userId: string,
+  role: string
+): Promise<string> {
+  const progress = await getAssignmentProgress(assignmentId, userId, role);
+
+  const header = [
+    "Student",
+    "Email",
+    "Status",
+    "Listening",
+    "Reading",
+    "Writing",
+    "Overall",
+    "SubmittedAt",
+    "Suspicious",
+  ];
+
+  const lines = [header.join(",")];
+
+  for (const item of progress.students) {
+    const scores = item.scores;
+
+    lines.push(
+      [
+        csvEscape(item.student.fullName),
+        csvEscape(item.student.email),
+        csvEscape(item.status),
+        csvEscape(scores?.listeningBand ?? ""),
+        csvEscape(scores?.readingBand ?? ""),
+        csvEscape(scores?.writingBand ?? ""),
+        csvEscape(scores?.overallBand ?? ""),
+        csvEscape(item.submittedAt ? item.submittedAt.toISOString() : ""),
+        csvEscape(item.suspicious === true ? "yes" : "no"),
+      ].join(",")
+    );
+  }
+
+  return lines.join("\n");
 }

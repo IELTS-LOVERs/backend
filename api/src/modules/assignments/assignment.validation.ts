@@ -7,6 +7,9 @@ export const CreateAssignmentSchema = z.object({
       classId: z.string().min(1).optional(),
       studentId: z.string().min(1).optional(),
       deadline: z.iso.datetime().optional(),
+      maxAttempts: z.coerce.number().int().min(1).max(10).optional().default(1),
+      shuffleQuestions: z.boolean().optional().default(false),
+      showScoreAfterSubmit: z.boolean().optional().default(true),
     })
     .refine((data) => Boolean(data.classId || data.studentId), {
       message: "Cần chọn giao cho lớp (classId) hoặc học sinh (studentId)",
@@ -19,10 +22,21 @@ export const UpdateAssignmentSchema = z.object({
     .object({
       deadline: z.iso.datetime().optional(),
       status: z.enum(["active", "archived"]).optional(),
+      maxAttempts: z.coerce.number().int().min(1).max(10).optional(),
+      shuffleQuestions: z.boolean().optional(),
+      showScoreAfterSubmit: z.boolean().optional(),
     })
-    .refine((data) => data.deadline !== undefined || data.status !== undefined, {
-      message: "Cần cung cấp ít nhất một trường để cập nhật",
-    }),
+    .refine(
+      (data) =>
+        data.deadline !== undefined ||
+        data.status !== undefined ||
+        data.maxAttempts !== undefined ||
+        data.shuffleQuestions !== undefined ||
+        data.showScoreAfterSubmit !== undefined,
+      {
+        message: "Cần cung cấp ít nhất một trường để cập nhật",
+      }
+    ),
 });
 
 export type CreateAssignmentBody = z.infer<typeof CreateAssignmentSchema>["body"];

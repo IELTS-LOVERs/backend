@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { evaluateSuspicious, summarizeEvents } from "./anti-cheat.service.js";
+import mongoose from "mongoose";
+import { describe, expect, it, vi } from "vitest";
+import { AttemptModel } from "../attempts/attempt.model.js";
+import { ExamEventModel } from "./exam-event.model.js";
+import {
+  evaluateSuspicious,
+  getSuspiciousAttempts,
+  summarizeEvents,
+} from "./anti-cheat.service.js";
 
 const thresholds = { tabSwitch: 5, fullscreenExit: 2, paste: 3 };
 
@@ -79,6 +86,80 @@ describe("summarizeEvents", () => {
     expect(summary.fullscreenExit).toBe(0);
     expect(summary.paste).toBe(0);
     expect(summary.suspicious).toBe(false);
+  });
+
+  it("counts INTERRUPTION events separately", () => {
+    const summary = summarizeEvents(
+      [{ type: "INTERRUPTION" }, { type: "INTERRUPTION" }, { type: "TAB_SWITCH" }],
+      false
+    );
+
+    expect(summary.interruption).toBe(2);
+    expect(summary.tabSwitchOrBlur).toBe(1);
+    expect(summary.totalEvents).toBe(3);
+  });
+});
+
+describe("getSuspiciousAttempts", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+
+  it("only reports attempts owned by the teacher and sorts by total events", async () => {
+    const ownedAttemptId = new mongoose.Types.ObjectId();
+    const foreignAttemptId = new mongoose.Types.ObjectId();
+
+    const mockFind = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([
+        {
+          _id: ownedAttemptId,
+          examId: {
+            _id: new mongoose.Types.ObjectId(),
+            title: "Owned Exam",
+            createdBy: new mongoose.Types.ObjectId(teacherId),
+          },
+          studentId: { fullName: "Student One", email: "s1@test.com" },
+          assignmentId: null,
+          submittedAt: new Date("2026-09-18"),
+        },
+        {
+          _id: foreignAttemptId,
+          examId: {
+            _id: new mongoose.Types.ObjectId(),
+            title: "Foreign Exam",
+            createdBy: new mongoose.Types.ObjectId(),
+          },
+          studentId: { fullName: "Student Two", email: "s2@test.com" },
+          assignmentId: null,
+          submittedAt: new Date("2026-09-18"),
+        },
+      ]),
+    };
+
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce(mockFind as never);
+    vi.spyOn(ExamEventModel, "aggregate").mockResolvedValueOnce([
+      { _id: { attemptId: ownedAttemptId, type: "TAB_SWITCH" }, count: 3 },
+      { _id: { attemptId: ownedAttemptId, type: "PASTE" }, count: 1 },
+    ] as never);
+
+    const result = await getSuspiciousAttempts(teacherId, "teacher", 50);
+
+    expect(result.total).toBe(1);
+    expect(result.items[0].attemptId).toBe(ownedAttemptId.toString());
+    expect(result.items[0].examTitle).toBe("Owned Exam");
+    expect(result.items[0].totalEvents).toBe(4);
+    expect(result.items[0].eventsByType).toEqual({ TAB_SWITCH: 3, PASTE: 1 });
+  });
+
+  it("returns an empty report when nothing is suspicious", async () => {
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    } as never);
+
+    const result = await getSuspiciousAttempts(teacherId, "teacher", 50);
+    expect(result).toEqual({ items: [], total: 0 });
   });
 });
 

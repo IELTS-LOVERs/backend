@@ -61,10 +61,10 @@ export async function getStudentDashboard(
     await Promise.all([
       getMyAssignments(studentId),
       AttemptModel.countDocuments({ studentId, status: "in_progress" }),
-      AttemptModel.countDocuments({ studentId, status: "submitted" }),
+      AttemptModel.countDocuments({ studentId, status: { $in: ["submitted", "expired"] } }),
       AttemptModel.find({
         studentId,
-        status: "submitted",
+        status: { $in: ["submitted", "expired"] },
         "scores.overallBand": { $ne: null },
       }).select("scores.overallBand"),
       getMyAttempts(studentId, { page: 1, limit: 5 }),
@@ -120,7 +120,7 @@ export async function getTeacherDashboard(
   );
 
   const attemptFilter: Record<string, unknown> = {
-    status: "submitted",
+    status: { $in: ["submitted", "expired"] },
   };
 
   if (!isAdmin) {

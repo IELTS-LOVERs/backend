@@ -8,6 +8,7 @@ import {
   calculateOverallBand,
   calculateWritingBand,
 } from "../../common/utils/ielts-calculator.js";
+import { logger } from "../../common/utils/logger.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { WritingReviewModel } from "./writing-review.model.js";
 import type { GradeWritingBody } from "./grading.validation.js";
@@ -141,7 +142,9 @@ export async function getPendingWritingSubmissions(
   teacherId: string,
   role: string
 ): Promise<PendingWritingResult> {
-  const attempts = await AttemptModel.find({ status: "submitted" })
+  const attempts = await AttemptModel.find({
+    status: { $in: ["submitted", "expired"] },
+  })
     .populate("examId", "title createdBy sections.skill")
     .populate("studentId", "fullName email")
     .populate("assignmentId", "teacherId")
@@ -205,7 +208,7 @@ export async function getAttemptForGrading(
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
-  if (attempt.status !== "submitted") {
+  if (attempt.status !== "submitted" && attempt.status !== "expired") {
     throw new BadRequestError("EXAM_NOT_SUBMITTED", "Bài thi chưa được nộp.");
   }
 
@@ -263,7 +266,7 @@ export async function gradeWriting(
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
-  if (attempt.status !== "submitted") {
+  if (attempt.status !== "submitted" && attempt.status !== "expired") {
     throw new BadRequestError("EXAM_NOT_SUBMITTED", "Bài thi chưa được nộp.");
   }
 
@@ -317,6 +320,12 @@ export async function gradeWriting(
     writing: overallWritingScore,
   });
   await attempt.save();
+
+  logger.info("writing.graded", {
+    attemptId: attempt._id.toString(),
+    teacherId,
+    overallWritingScore,
+  });
 
   return {
     id: review._id.toString(),

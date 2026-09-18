@@ -10,7 +10,8 @@ export type ExamEventType =
   | "COPY"
   | "PASTE"
   | "CUT"
-  | "CONTEXT_MENU";
+  | "CONTEXT_MENU"
+  | "INTERRUPTION";
 
 export interface IExamEvent extends mongoose.Document {
   _id: Types.ObjectId;
@@ -37,6 +38,7 @@ const ExamEventSchema = new Schema<IExamEvent>(
         "PASTE",
         "CUT",
         "CONTEXT_MENU",
+        "INTERRUPTION",
       ],
       required: true,
     },

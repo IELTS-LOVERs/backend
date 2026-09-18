@@ -1,7 +1,13 @@
 import { z } from "zod";
 
 const TaskGradeSchema = z.object({
-  score: z.number().min(0).max(9),
+  score: z
+    .number()
+    .min(0)
+    .max(9)
+    .refine((score) => Number.isInteger(score * 2), {
+      message: "Điểm Writing phải theo bước 0.5.",
+    }),
   comment: z.string().optional(),
 });
 

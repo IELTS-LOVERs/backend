@@ -68,3 +68,13 @@ export async function getAssignmentProgress(req: Request, res: Response): Promis
   const result = await assignmentService.getAssignmentProgress(id, user.id, user.role);
   sendSuccess(res, result);
 }
+
+export async function exportAssignmentReport(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const csv = await assignmentService.exportAssignmentCsv(id, user.id, user.role);
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="assignment-${id}.csv"`);
+  res.status(200).send(`\uFEFF${csv}`);
+}

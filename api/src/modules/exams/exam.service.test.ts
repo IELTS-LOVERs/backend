@@ -1,10 +1,13 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
 import { BadRequestError, ForbiddenError } from "../../common/errors/AppError.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
+import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "./exam.model.js";
 import {
   assertOwnership,
+  clone,
   getById,
   list,
   mapSections,
@@ -188,7 +191,17 @@ describe("publish and unpublish", () => {
 describe("student access to exams", () => {
   const studentId = new mongoose.Types.ObjectId().toString();
 
-  it("forces status: 'published' when role is student in list", async () => {
+  it("forces status 'published' and only assigned exam ids when role is student in list", async () => {
+    const classId = new mongoose.Types.ObjectId();
+    const assignedExamId = new mongoose.Types.ObjectId();
+
+    vi.spyOn(ClassModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([{ _id: classId }]),
+    } as never);
+    vi.spyOn(AssignmentModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([{ examId: assignedExamId }]),
+    } as never);
+
     let capturedQuery: unknown;
     vi.spyOn(ExamModel, "find").mockImplementationOnce((query: unknown) => {
       capturedQuery = query;
@@ -203,7 +216,10 @@ describe("student access to exams", () => {
     vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(0 as never);
 
     await list(studentId, "student", { page: 1, limit: 10 });
-    expect(capturedQuery).toEqual({ status: "published" });
+    expect(capturedQuery).toEqual({
+      status: "published",
+      _id: { $in: [assignedExamId] },
+    });
   });
 
   it("throws ForbiddenError when student tries to get non-published exam", async () => {
@@ -217,5 +233,89 @@ describe("student access to exams", () => {
     } as never);
 
     await expect(getById("exam-123", studentId, "student")).rejects.toThrow(ForbiddenError);
+  });
+});
+
+describe("BUG-01 student exam projection", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+
+  it("strips acceptedAnswers and explanation for students", async () => {
+    const examId = new mongoose.Types.ObjectId();
+    const questionId = new mongoose.Types.ObjectId();
+    const examDoc = {
+      _id: examId,
+      title: "Mock",
+      durationMinutes: 60,
+      status: "published",
+      createdBy: new mongoose.Types.ObjectId(),
+      toObject: () => ({
+        _id: examId,
+        title: "Mock",
+        sections: [
+          {
+            skill: "listening",
+            part: 1,
+            title: "S1",
+            mediaIds: [],
+            questionIds: [
+              {
+                _id: questionId,
+                skill: "listening",
+                type: "form_completion",
+                part: 1,
+                prompt: "City?",
+                data: {},
+                acceptedAnswers: ["london"],
+                explanation: "because the speaker said so",
+                mediaIds: [],
+                points: 1,
+              },
+            ],
+          },
+        ],
+      }),
+    };
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue(examDoc),
+    } as never);
+
+    const result = await getById(examId.toString(), studentId, "student");
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toContain("acceptedAnswers");
+    expect(serialized).not.toContain("explanation");
+    expect(serialized).not.toContain("london");
+    expect((result as { durationMinutes: number }).durationMinutes).toBe(60);
+    expect((result as { status: string }).status).toBe("published");
+  });
+
+  it("denies a non-owner teacher even for published exams", async () => {
+    const publishedExam = {
+      _id: new mongoose.Types.ObjectId(),
+      status: "published",
+      createdBy: new mongoose.Types.ObjectId(),
+      sections: [],
+    };
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue(publishedExam),
+    } as never);
+
+    await expect(getById("exam-123", "stranger-teacher", "teacher")).rejects.toThrow(
+      ForbiddenError
+    );
+  });
+});
+
+describe("BUG-04 clone ownership", () => {
+  it("denies cloning an exam owned by another teacher", async () => {
+    const original = {
+      _id: new mongoose.Types.ObjectId(),
+      createdBy: new mongoose.Types.ObjectId(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(original as never);
+
+    await expect(
+      clone(original._id.toString(), "stranger-teacher", "teacher")
+    ).rejects.toThrow(ForbiddenError);
   });
 });

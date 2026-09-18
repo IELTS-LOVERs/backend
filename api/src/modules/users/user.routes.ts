@@ -4,7 +4,13 @@ import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as dashboardController from "../dashboard/dashboard.controller.js";
 import * as userController from "./user.controller.js";
-import { AdminResetPasswordSchema, UpdateProfileSchema } from "./user.validation.js";
+import {
+  AdminResetPasswordSchema,
+  CreateUserSchema,
+  ListUsersSchema,
+  UpdateProfileSchema,
+  UpdateUserStatusSchema,
+} from "./user.validation.js";
 
 const router = Router();
 
@@ -21,6 +27,27 @@ router.get(
   authenticate,
   requireRoles("teacher", "admin"),
   dashboardController.getTeacherDashboard
+);
+router.get(
+  "/",
+  authenticate,
+  requireRoles("admin"),
+  validate(ListUsersSchema),
+  userController.listUsers
+);
+router.post(
+  "/",
+  authenticate,
+  requireRoles("admin"),
+  validate(CreateUserSchema),
+  userController.createUser
+);
+router.patch(
+  "/:id/status",
+  authenticate,
+  requireRoles("admin"),
+  validate(UpdateUserStatusSchema),
+  userController.updateUserStatus
 );
 router.post(
   "/:id/reset-password",

@@ -1,8 +1,9 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
+import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { UserModel, type IUser } from "./user.model.js";
 import { toSafeUser } from "./user.serializer.js";
-import { updateProfile } from "./user.service.js";
+import { createUser, listUsers, updateProfile, updateUserStatus } from "./user.service.js";
 
 describe("toSafeUser", () => {
   it("serializes user document to safe user payload without passwordHash", () => {
@@ -95,5 +96,89 @@ describe("updateProfile", () => {
     expect(mockUser.save).toHaveBeenCalled();
     expect(result.fullName).toBe("New Name");
     expect((result as unknown as Record<string, unknown>).passwordHash).toBeUndefined();
+  });
+});
+
+describe("admin user management", () => {
+  it("filters users by role, status and search term", async () => {
+    let capturedQuery: Record<string, unknown> | undefined;
+    const mockFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([{ _id: "u1" }]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return mockFind as never;
+    });
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(1 as never);
+
+    const result = await listUsers({
+      role: "teacher",
+      status: "active",
+      search: "an",
+      page: 1,
+      limit: 20,
+    });
+
+    expect(capturedQuery?.role).toBe("teacher");
+    expect(capturedQuery?.status).toBe("active");
+    expect(capturedQuery?.$or).toBeDefined();
+    expect(result.users).toHaveLength(1);
+    expect(result.totalPages).toBe(1);
+  });
+
+  it("rejects a duplicate email when creating a user", async () => {
+    vi.spyOn(UserModel, "findOne").mockResolvedValueOnce({ _id: "existing" } as never);
+
+    await expect(
+      createUser({
+        email: "teacher@example.com",
+        password: "Password@1",
+        fullName: "New Teacher",
+        role: "teacher",
+      })
+    ).rejects.toThrow(ConflictError);
+  });
+
+  it("creates a teacher account when the email is free", async () => {
+    vi.spyOn(UserModel, "findOne").mockResolvedValueOnce(null);
+    vi.spyOn(UserModel, "create").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+      role: "teacher",
+      status: "active",
+    } as never);
+
+    const user = await createUser({
+      email: "teacher@example.com",
+      password: "Password@1",
+      fullName: "New Teacher",
+      role: "teacher",
+    });
+
+    expect(user.role).toBe("teacher");
+  });
+
+  it("bumps tokenVersion when suspending a user", async () => {
+    const userId = new mongoose.Types.ObjectId();
+    const doc = {
+      _id: userId,
+      status: "active",
+      tokenVersion: 2,
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(UserModel, "findById").mockResolvedValueOnce(doc as never);
+
+    await updateUserStatus(userId.toString(), "suspended");
+
+    expect(doc.status).toBe("suspended");
+    expect(doc.tokenVersion).toBe(3);
+  });
+
+  it("throws NotFoundError when updating a missing user", async () => {
+    vi.spyOn(UserModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(updateUserStatus("missing", "active")).rejects.toThrow(NotFoundError);
   });
 });

@@ -47,6 +47,29 @@ describe("GradeWritingSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects scores that are not multiples of 0.5", () => {
+    const result = GradeWritingSchema.safeParse({
+      ...validPayload(),
+      body: { ...validPayload().body, task1: { score: 6.3 } },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.message.includes("0.5"))).toBe(
+        true
+      );
+    }
+  });
+
+  it("accepts half-band scores", () => {
+    const result = GradeWritingSchema.safeParse({
+      ...validPayload(),
+      body: { ...validPayload().body, task1: { score: 6.5 }, task2: { score: 7 } },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it("rejects a missing attemptId", () => {
     const result = GradeWritingSchema.safeParse({
       body: {
