@@ -1,8 +1,9 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
-import { ForbiddenError } from "../../common/errors/AppError.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel, type IQuestion } from "./question.model.js";
-import { assertOwner, list, serializeQuestion } from "./question.service.js";
+import { assertOwner, list, remove, serializeQuestion } from "./question.service.js";
 
 describe("serializeQuestion", () => {
   it("converts ObjectIds to strings and normalizes null fields", () => {
@@ -88,5 +89,55 @@ describe("list questions with search", () => {
     expect(queryObj.$or?.[0].prompt?.flags).toContain("i");
     expect(queryObj.$or?.[1].content?.source).toBe("environment");
     expect(queryObj.$or?.[1].content?.flags).toContain("i");
+  });
+});
+
+describe("remove question referential integrity", () => {
+  const questionId = new mongoose.Types.ObjectId();
+  const userId = new mongoose.Types.ObjectId();
+
+  it("throws NotFoundError when the question does not exist", async () => {
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(remove(questionId.toString(), userId.toString(), "teacher")).rejects.toThrow(
+      NotFoundError
+    );
+  });
+
+  it("blocks deletion when the question belongs to a published or closed exam", async () => {
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce({
+      _id: questionId,
+      createdBy: userId,
+    } as never);
+    vi.spyOn(ExamModel, "findOne").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Final Mock",
+        status: "published",
+      }),
+    } as never);
+    const deleteSpy = vi.spyOn(QuestionModel, "deleteOne");
+
+    await expect(remove(questionId.toString(), userId.toString(), "teacher")).rejects.toThrow(
+      BadRequestError
+    );
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it("deletes the question when it is not used by any published or closed exam", async () => {
+    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce({
+      _id: questionId,
+      createdBy: userId,
+    } as never);
+    vi.spyOn(ExamModel, "findOne").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue(null),
+    } as never);
+    const deleteSpy = vi
+      .spyOn(QuestionModel, "deleteOne")
+      .mockResolvedValueOnce({ acknowledged: true, deletedCount: 1 } as never);
+
+    await remove(questionId.toString(), userId.toString(), "teacher");
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
   });
 });

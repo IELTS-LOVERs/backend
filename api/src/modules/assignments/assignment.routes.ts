@@ -3,7 +3,11 @@ import { authenticate } from "../../common/middlewares/auth.middleware.js";
 import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as assignmentController from "./assignment.controller.js";
-import { CreateAssignmentSchema, ListAssignmentsQuerySchema } from "./assignment.validation.js";
+import {
+  CreateAssignmentSchema,
+  ListAssignmentsQuerySchema,
+  UpdateAssignmentSchema,
+} from "./assignment.validation.js";
 
 const router = Router();
 
@@ -26,6 +30,25 @@ router.get(
   authenticate,
   requireRoles("student"),
   assignmentController.getMyAssignments
+);
+router.get(
+  "/:id",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  assignmentController.getAssignment
+);
+router.patch(
+  "/:id",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  validate(UpdateAssignmentSchema),
+  assignmentController.updateAssignment
+);
+router.delete(
+  "/:id",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  assignmentController.deleteAssignment
 );
 router.get(
   "/:id/progress",

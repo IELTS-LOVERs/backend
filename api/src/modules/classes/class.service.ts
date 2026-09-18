@@ -6,9 +6,10 @@ import {
   ForbiddenError,
   NotFoundError,
 } from "../../common/errors/AppError.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { UserModel } from "../users/user.model.js";
 import { ClassModel, type IClass } from "./class.model.js";
-import type { CreateClassBody } from "./class.validation.js";
+import type { CreateClassBody, UpdateClassBody } from "./class.validation.js";
 
 // Excludes visually confusing characters: 0, O, 1, I, L.
 const CLASS_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -166,6 +167,63 @@ export async function getClassDetail(
         : { id: "", fullName: "" },
     students,
   };
+}
+
+export async function updateClass(
+  classId: string,
+  userId: string,
+  role: string,
+  data: UpdateClassBody
+): Promise<ClassSummary> {
+  const cls = await ClassModel.findById(classId);
+
+  if (!cls) {
+    throw new NotFoundError("Lớp học không tồn tại.");
+  }
+
+  assertOwnership(cls, userId, role);
+
+  if (data.name !== undefined) {
+    cls.name = data.name;
+  }
+
+  if (data.description !== undefined) {
+    cls.description = data.description;
+  }
+
+  await cls.save();
+
+  return serializeSummary(cls);
+}
+
+export async function deleteClass(
+  classId: string,
+  userId: string,
+  role: string
+): Promise<{ message: string }> {
+  const cls = await ClassModel.findById(classId);
+
+  if (!cls) {
+    throw new NotFoundError("Lớp học không tồn tại.");
+  }
+
+  assertOwnership(cls, userId, role);
+
+  const activeAssignments = await AssignmentModel.countDocuments({
+    classId: cls._id,
+    status: "active",
+  });
+
+  if (activeAssignments > 0) {
+    throw new BadRequestError(
+      "CLASS_HAS_ACTIVE_ASSIGNMENTS",
+      "Không thể xóa lớp đang có bài tập được giao. Hãy hủy hoặc lưu trữ các bài tập trước."
+    );
+  }
+
+  await ClassModel.deleteOne({ _id: cls._id });
+
+  return { message: "Đã xóa lớp học thành công" };
 }
 
 export async function joinClass(

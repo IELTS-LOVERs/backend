@@ -1,13 +1,18 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
-import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { AssignmentModel } from "./assignment.model.js";
 import {
+  deleteAssignment,
+  getAssignmentById,
   getAssignmentProgress,
   getAssignmentsForTeacher,
+  getMyAssignments,
   resolveSubmissionStatuses,
+  selectAssignmentAttempt,
+  updateAssignment,
 } from "./assignment.service.js";
 
 describe("resolveSubmissionStatuses", () => {
@@ -220,5 +225,297 @@ describe("getAssignmentProgress", () => {
     expect(result.students[0].scores?.overallBand).toBe(7.5);
     expect(result.students[1].status).toBe("in_progress");
     expect(result.students[2].status).toBe("not_started");
+  });
+});
+
+describe("selectAssignmentAttempt", () => {
+  it("returns null when there are no candidates", () => {
+    expect(selectAssignmentAttempt([])).toBeNull();
+  });
+
+  it("prefers an in-progress attempt over a submitted one", () => {
+    const result = selectAssignmentAttempt([
+      { status: "submitted", submittedAt: new Date("2026-09-20") },
+      { status: "in_progress" },
+    ]);
+
+    expect(result?.status).toBe("in_progress");
+  });
+
+  it("returns the most recently submitted attempt when none are in progress", () => {
+    const result = selectAssignmentAttempt([
+      { status: "submitted", submittedAt: new Date("2026-09-01") },
+      { status: "submitted", submittedAt: new Date("2026-09-30") },
+    ]);
+
+    expect(result?.submittedAt).toEqual(new Date("2026-09-30"));
+  });
+
+  it("ignores expired attempts when a submitted one exists", () => {
+    const result = selectAssignmentAttempt([
+      { status: "expired" },
+      { status: "submitted", submittedAt: new Date("2026-09-15") },
+    ]);
+
+    expect(result?.status).toBe("submitted");
+  });
+});
+
+describe("getMyAssignments enrichment", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const assignmentId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+  const teacherId = new mongoose.Types.ObjectId();
+  const classId = new mongoose.Types.ObjectId();
+  const attemptId = new mongoose.Types.ObjectId();
+
+  it("returns enriched cards with teacher, class, attempt and scores", async () => {
+    vi.spyOn(ClassModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([{ _id: classId }]),
+    } as never);
+
+    const mockFind = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: assignmentId,
+          examId: { _id: examId, title: "Mock Exam", durationMinutes: 60 },
+          teacherId: { _id: teacherId, fullName: "Teacher A" },
+          classId: { _id: classId, name: "Class A" },
+          deadline: new Date("2026-10-01"),
+        },
+      ]),
+    };
+    vi.spyOn(AssignmentModel, "find").mockReturnValueOnce(mockFind as never);
+
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([
+        {
+          _id: attemptId,
+          assignmentId,
+          examId,
+          status: "submitted",
+          scores: { overallBand: 7 },
+          submittedAt: new Date("2026-09-20"),
+        },
+      ]),
+    } as never);
+
+    const result = await getMyAssignments(studentId);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: assignmentId.toString(),
+      examTitle: "Mock Exam",
+      durationMinutes: 60,
+      teacherName: "Teacher A",
+      className: "Class A",
+      attemptId: attemptId.toString(),
+      scores: { overallBand: 7 },
+      submissionStatus: "submitted",
+    });
+  });
+
+  it("returns null attempt data and a personal class when nothing matches", async () => {
+    vi.spyOn(ClassModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([]),
+    } as never);
+
+    const mockFind = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: assignmentId,
+          examId: { _id: examId, title: "Solo Exam", durationMinutes: 45 },
+          teacherId: { _id: teacherId, fullName: "Teacher B" },
+          classId: null,
+          deadline: null,
+        },
+      ]),
+    };
+    vi.spyOn(AssignmentModel, "find").mockReturnValueOnce(mockFind as never);
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([]),
+    } as never);
+
+    const result = await getMyAssignments(studentId);
+
+    expect(result[0].teacherName).toBe("Teacher B");
+    expect(result[0].className).toBeNull();
+    expect(result[0].attemptId).toBeNull();
+    expect(result[0].scores).toBeNull();
+    expect(result[0].submissionStatus).toBe("not_started");
+  });
+});
+
+describe("getAssignmentById", () => {
+  const assignmentId = new mongoose.Types.ObjectId();
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+  const classId = new mongoose.Types.ObjectId();
+
+  it("throws NotFoundError when the assignment does not exist", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockReturnValue({
+          populate: vi.fn().mockResolvedValue(null),
+        }),
+      }),
+    } as never);
+
+    await expect(
+      getAssignmentById(assignmentId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws ForbiddenError for a non-owner teacher", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockReturnValue({
+          populate: vi.fn().mockResolvedValue({
+            _id: assignmentId,
+            teacherId: { _id: new mongoose.Types.ObjectId(), fullName: "Other" },
+            examId: { _id: examId, title: "E", durationMinutes: 60, status: "published" },
+            classId: null,
+            status: "active",
+            assignedAt: new Date(),
+          }),
+        }),
+      }),
+    } as never);
+
+    await expect(
+      getAssignmentById(assignmentId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("serializes the assignment detail for the owner", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockReturnValue({
+          populate: vi.fn().mockResolvedValue({
+            _id: assignmentId,
+            teacherId: { _id: teacherId, fullName: "Teacher A" },
+            examId: { _id: examId, title: "E", durationMinutes: 60, status: "published" },
+            classId: { _id: classId, name: "Class A", code: "ABC123" },
+            status: "active",
+            deadline: new Date("2026-10-01"),
+            assignedAt: new Date("2026-09-01"),
+          }),
+        }),
+      }),
+    } as never);
+
+    const result = await getAssignmentById(
+      assignmentId.toString(),
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(result.id).toBe(assignmentId.toString());
+    expect(result.exam).toEqual({
+      id: examId.toString(),
+      title: "E",
+      durationMinutes: 60,
+      status: "published",
+    });
+    expect(result.class).toEqual({ id: classId.toString(), name: "Class A", code: "ABC123" });
+    expect(result.teacher).toEqual({ id: teacherId.toString(), fullName: "Teacher A" });
+    expect(result.status).toBe("active");
+  });
+});
+
+describe("updateAssignment", () => {
+  const assignmentId = new mongoose.Types.ObjectId();
+  const teacherId = new mongoose.Types.ObjectId();
+
+  it("throws NotFoundError when the assignment does not exist", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(
+      updateAssignment(assignmentId.toString(), teacherId.toString(), "teacher", {
+        status: "archived",
+      })
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws ForbiddenError for a non-owner teacher", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce({
+      _id: assignmentId,
+      teacherId: new mongoose.Types.ObjectId(),
+      status: "active",
+      save: vi.fn(),
+    } as never);
+
+    await expect(
+      updateAssignment(assignmentId.toString(), teacherId.toString(), "teacher", {
+        status: "archived",
+      })
+    ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("updates the deadline and status for the owner", async () => {
+    const doc = {
+      _id: assignmentId,
+      teacherId,
+      status: "active",
+      deadline: undefined as Date | undefined,
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce(doc as never);
+
+    const result = await updateAssignment(assignmentId.toString(), teacherId.toString(), "teacher", {
+      deadline: "2026-12-01T00:00:00.000Z",
+      status: "archived",
+    });
+
+    expect(result.status).toBe("archived");
+    expect(result.deadline).toEqual(new Date("2026-12-01T00:00:00.000Z"));
+    expect(doc.save).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("deleteAssignment", () => {
+  const assignmentId = new mongoose.Types.ObjectId();
+  const teacherId = new mongoose.Types.ObjectId();
+
+  it("throws NotFoundError when the assignment does not exist", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(
+      deleteAssignment(assignmentId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws BadRequestError when students are still working on it", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce({
+      _id: assignmentId,
+      teacherId,
+    } as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(2 as never);
+
+    await expect(
+      deleteAssignment(assignmentId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow(BadRequestError);
+  });
+
+  it("deletes the assignment for the owner when no active attempts exist", async () => {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce({
+      _id: assignmentId,
+      teacherId,
+    } as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(0 as never);
+    const deleteSpy = vi
+      .spyOn(AssignmentModel, "deleteOne")
+      .mockResolvedValueOnce({ acknowledged: true, deletedCount: 1 } as never);
+
+    const result = await deleteAssignment(
+      assignmentId.toString(),
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(result.message).toBe("Đã xóa bài tập thành công");
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
   });
 });

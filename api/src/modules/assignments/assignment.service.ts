@@ -5,7 +5,7 @@ import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { UserModel } from "../users/user.model.js";
 import { AssignmentModel, type AssignmentStatus } from "./assignment.model.js";
-import type { CreateAssignmentBody } from "./assignment.validation.js";
+import type { CreateAssignmentBody, UpdateAssignmentBody } from "./assignment.validation.js";
 
 export type SubmissionStatus = "not_started" | "in_progress" | "submitted" | "expired";
 
@@ -31,12 +31,76 @@ export interface MyAssignment {
   durationMinutes: number;
   deadline: Date | null;
   submissionStatus: SubmissionStatus;
+  teacherName: string;
+  className: string | null;
+  attemptId: string | null;
+  scores: IAttemptScores | null;
+}
+
+export interface AssignmentDetail {
+  id: string;
+  exam: {
+    id: string;
+    title: string;
+    durationMinutes: number;
+    status: string;
+  } | null;
+  class: {
+    id: string;
+    name: string;
+    code: string;
+  } | null;
+  teacher: {
+    id: string;
+    fullName: string;
+  } | null;
+  deadline: Date | null;
+  status: AssignmentStatus;
+  assignedAt: Date;
 }
 
 interface PopulatedExam {
   _id: Types.ObjectId;
   title: string;
   durationMinutes: number;
+}
+
+interface PopulatedTeacher {
+  _id: Types.ObjectId;
+  fullName: string;
+}
+
+interface PopulatedClass {
+  _id: Types.ObjectId;
+  name: string;
+}
+
+interface AttemptStatusDoc {
+  status: SubmissionStatus;
+  submittedAt?: Date;
+  updatedAt?: Date;
+  createdAt?: Date;
+}
+
+function attemptTimestamp(attempt: AttemptStatusDoc): number {
+  const reference = attempt.submittedAt ?? attempt.updatedAt ?? attempt.createdAt;
+  return reference ? reference.getTime() : 0;
+}
+
+/**
+ * Picks the attempt that best represents an assignment entry for the student:
+ * an in-progress attempt takes priority so the card can resume it, otherwise the
+ * most recently submitted attempt is used to display the score.
+ */
+export function selectAssignmentAttempt<T extends AttemptStatusDoc>(candidates: T[]): T | null {
+  const inProgress = candidates.find((attempt) => attempt.status === "in_progress");
+  if (inProgress) return inProgress;
+
+  const submitted = candidates
+    .filter((attempt) => attempt.status === "submitted")
+    .sort((a, b) => attemptTimestamp(b) - attemptTimestamp(a));
+
+  return submitted[0] ?? null;
 }
 
 /**
@@ -126,6 +190,134 @@ export async function create(
   };
 }
 
+export async function getAssignmentById(
+  assignmentId: string,
+  userId: string,
+  role: string
+): Promise<AssignmentDetail> {
+  const assignment = await AssignmentModel.findById(assignmentId)
+    .populate("examId", "title durationMinutes status")
+    .populate("classId", "name code")
+    .populate("teacherId", "fullName");
+
+  if (!assignment) {
+    throw new NotFoundError("Bài tập không tồn tại.");
+  }
+
+  const teacher = assignment.teacherId as unknown as PopulatedTeacher | null;
+  const teacherIdStr =
+    teacher && teacher._id ? teacher._id.toString() : assignment.teacherId?.toString();
+
+  if (role !== "admin" && teacherIdStr !== userId) {
+    throw new ForbiddenError("FORBIDDEN", "Không có quyền xem bài tập này.");
+  }
+
+  const exam = assignment.examId as unknown as {
+    _id?: Types.ObjectId;
+    title?: string;
+    durationMinutes?: number;
+    status?: string;
+  } | null;
+  const cls = assignment.classId as unknown as {
+    _id?: Types.ObjectId;
+    name?: string;
+    code?: string;
+  } | null;
+
+  return {
+    id: assignment._id.toString(),
+    exam:
+      exam && exam._id
+        ? {
+            id: exam._id.toString(),
+            title: exam.title ?? "",
+            durationMinutes: exam.durationMinutes ?? 0,
+            status: exam.status ?? "",
+          }
+        : null,
+    class:
+      cls && cls._id
+        ? {
+            id: cls._id.toString(),
+            name: cls.name ?? "",
+            code: cls.code ?? "",
+          }
+        : null,
+    teacher:
+      teacher && teacher._id
+        ? { id: teacher._id.toString(), fullName: teacher.fullName }
+        : null,
+    deadline: assignment.deadline ?? null,
+    status: assignment.status,
+    assignedAt: assignment.assignedAt,
+  };
+}
+
+export async function updateAssignment(
+  assignmentId: string,
+  userId: string,
+  role: string,
+  data: UpdateAssignmentBody
+): Promise<{ id: string; deadline: Date | null; status: AssignmentStatus }> {
+  const assignment = await AssignmentModel.findById(assignmentId);
+
+  if (!assignment) {
+    throw new NotFoundError("Bài tập không tồn tại.");
+  }
+
+  if (role !== "admin" && assignment.teacherId.toString() !== userId) {
+    throw new ForbiddenError("FORBIDDEN", "Không có quyền chỉnh sửa bài tập này.");
+  }
+
+  if (data.deadline !== undefined) {
+    assignment.deadline = new Date(data.deadline);
+  }
+
+  if (data.status !== undefined) {
+    assignment.status = data.status;
+  }
+
+  await assignment.save();
+
+  return {
+    id: assignment._id.toString(),
+    deadline: assignment.deadline ?? null,
+    status: assignment.status,
+  };
+}
+
+export async function deleteAssignment(
+  assignmentId: string,
+  userId: string,
+  role: string
+): Promise<{ message: string }> {
+  const assignment = await AssignmentModel.findById(assignmentId);
+
+  if (!assignment) {
+    throw new NotFoundError("Bài tập không tồn tại.");
+  }
+
+  if (role !== "admin" && assignment.teacherId.toString() !== userId) {
+    throw new ForbiddenError("FORBIDDEN", "Không có quyền xóa bài tập này.");
+  }
+
+  const inProgress = await AttemptModel.countDocuments({
+    assignmentId: assignment._id,
+    status: "in_progress",
+  });
+
+  if (inProgress > 0) {
+    throw new BadRequestError(
+      "ASSIGNMENT_HAS_ACTIVE_ATTEMPTS",
+      "Không thể xóa bài tập đang có học sinh làm bài."
+    );
+  }
+
+  await AssignmentModel.deleteOne({ _id: assignment._id });
+
+  return { message: "Đã xóa bài tập thành công" };
+}
+
 export async function getMyAssignments(studentId: string): Promise<MyAssignment[]> {
   const classes = await ClassModel.find({ students: studentId }).select("_id");
   const classIds = classes.map((cls) => cls._id);
@@ -135,14 +327,27 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
     $or: [{ classId: { $in: classIds } }, { studentId }],
   })
     .populate("examId", "title durationMinutes")
+    .populate("teacherId", "fullName")
+    .populate("classId", "name")
     .sort({ assignedAt: -1 });
 
-  const entries: Array<Omit<MyAssignment, "submissionStatus"> & { examId: string }> = [];
+  const entries: Array<{
+    id: string;
+    examId: string;
+    examTitle: string;
+    durationMinutes: number;
+    deadline: Date | null;
+    teacherName: string;
+    className: string | null;
+  }> = [];
 
   for (const assignment of assignments) {
     const exam = assignment.examId as unknown as PopulatedExam | null;
 
     if (!exam) continue;
+
+    const teacher = assignment.teacherId as unknown as PopulatedTeacher | null;
+    const cls = assignment.classId as unknown as PopulatedClass | null;
 
     entries.push({
       id: assignment._id.toString(),
@@ -150,6 +355,8 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
       examTitle: exam.title,
       durationMinutes: exam.durationMinutes,
       deadline: assignment.deadline ?? null,
+      teacherName: teacher?.fullName ?? "",
+      className: cls?.name ?? null,
     });
   }
 
@@ -164,7 +371,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
             { assignmentId: { $in: assignmentIds } },
             { examId: { $in: examIds } },
           ],
-        }).select("assignmentId examId status")
+        }).select("assignmentId examId status scores submittedAt updatedAt")
       : [];
 
   const statuses = resolveSubmissionStatuses(
@@ -175,13 +382,26 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
     }))
   );
 
-  return entries.map((entry) => ({
-    id: entry.id,
-    examTitle: entry.examTitle,
-    durationMinutes: entry.durationMinutes,
-    deadline: entry.deadline,
-    submissionStatus: statuses.get(entry.id) ?? statuses.get(entry.examId) ?? "not_started",
-  }));
+  return entries.map((entry) => {
+    const candidates = attempts.filter(
+      (attempt) =>
+        attempt.assignmentId?.toString() === entry.id ||
+        attempt.examId.toString() === entry.examId
+    );
+    const selected = selectAssignmentAttempt(candidates);
+
+    return {
+      id: entry.id,
+      examTitle: entry.examTitle,
+      durationMinutes: entry.durationMinutes,
+      deadline: entry.deadline,
+      submissionStatus: statuses.get(entry.id) ?? statuses.get(entry.examId) ?? "not_started",
+      teacherName: entry.teacherName,
+      className: entry.className,
+      attemptId: selected ? selected._id.toString() : null,
+      scores: selected && selected.status === "submitted" ? selected.scores : null,
+    };
+  });
 }
 
 export interface TeacherAssignmentOverview {

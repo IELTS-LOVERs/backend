@@ -1,5 +1,6 @@
 import mongoose, { type UpdateQuery } from "mongoose";
-import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel, type IQuestion } from "./question.model.js";
 import type { CreateQuestionBody, ListQuestionsQuery, UpdateQuestionBody } from "./question.validation.js";
 
@@ -157,6 +158,18 @@ export async function remove(id: string, userId: string, role: string): Promise<
   }
 
   assertOwner(question, userId, role);
+
+  const examUsingQuestion = await ExamModel.findOne({
+    "sections.questionIds": question._id,
+    status: { $in: ["published", "closed"] },
+  }).select("_id title status");
+
+  if (examUsingQuestion) {
+    throw new BadRequestError(
+      "QUESTION_IN_USE",
+      `Không thể xóa câu hỏi đang được sử dụng trong đề thi "${examUsingQuestion.title}" (${examUsingQuestion.status}).`
+    );
+  }
 
   await QuestionModel.deleteOne({ _id: question._id });
 }

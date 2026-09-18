@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { AddStudentSchema, CreateClassSchema, JoinClassSchema } from "./class.validation.js";
+import {
+  AddStudentSchema,
+  CreateClassSchema,
+  JoinClassSchema,
+  UpdateClassSchema,
+} from "./class.validation.js";
 
 describe("CreateClassSchema", () => {
   it("accepts a valid payload", () => {
@@ -9,6 +14,40 @@ describe("CreateClassSchema", () => {
 
   it("rejects a name shorter than 2 characters", () => {
     const result = CreateClassSchema.safeParse({ body: { name: "A" } });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("UpdateClassSchema", () => {
+  it("accepts updating only the name", () => {
+    const result = UpdateClassSchema.safeParse({
+      params: { id: "66e8601c262f3b9200000002" },
+      body: { name: "New Name" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts updating only the description", () => {
+    const result = UpdateClassSchema.safeParse({
+      params: { id: "66e8601c262f3b9200000002" },
+      body: { description: "New description" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an empty update payload", () => {
+    const result = UpdateClassSchema.safeParse({
+      params: { id: "66e8601c262f3b9200000002" },
+      body: {},
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a name shorter than 2 characters", () => {
+    const result = UpdateClassSchema.safeParse({
+      params: { id: "66e8601c262f3b9200000002" },
+      body: { name: "A" },
+    });
     expect(result.success).toBe(false);
   });
 });

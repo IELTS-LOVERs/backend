@@ -13,7 +13,20 @@ export const CreateAssignmentSchema = z.object({
     }),
 });
 
+export const UpdateAssignmentSchema = z.object({
+  params: z.object({ id: z.string().min(1, "Thiếu ID bài tập") }),
+  body: z
+    .object({
+      deadline: z.iso.datetime().optional(),
+      status: z.enum(["active", "archived"]).optional(),
+    })
+    .refine((data) => data.deadline !== undefined || data.status !== undefined, {
+      message: "Cần cung cấp ít nhất một trường để cập nhật",
+    }),
+});
+
 export type CreateAssignmentBody = z.infer<typeof CreateAssignmentSchema>["body"];
+export type UpdateAssignmentBody = z.infer<typeof UpdateAssignmentSchema>["body"];
 
 export const ListAssignmentsQuerySchema = z.object({
   query: z.object({

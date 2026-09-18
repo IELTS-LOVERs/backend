@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CreateAssignmentSchema, ListAssignmentsQuerySchema } from "./assignment.validation.js";
+import {
+  CreateAssignmentSchema,
+  ListAssignmentsQuerySchema,
+  UpdateAssignmentSchema,
+} from "./assignment.validation.js";
 
 describe("CreateAssignmentSchema", () => {
   it("accepts assigning to a class", () => {
@@ -35,6 +39,47 @@ describe("CreateAssignmentSchema", () => {
       },
     });
 
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("UpdateAssignmentSchema", () => {
+  const id = "66e8641c262f3b9200000004";
+
+  it("accepts extending the deadline", () => {
+    const result = UpdateAssignmentSchema.safeParse({
+      params: { id },
+      body: { deadline: "2026-12-01T00:00:00.000Z" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts archiving the assignment", () => {
+    const result = UpdateAssignmentSchema.safeParse({
+      params: { id },
+      body: { status: "archived" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an empty update payload", () => {
+    const result = UpdateAssignmentSchema.safeParse({ params: { id }, body: {} });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an invalid deadline format", () => {
+    const result = UpdateAssignmentSchema.safeParse({
+      params: { id },
+      body: { deadline: "30-09-2026" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an unknown status", () => {
+    const result = UpdateAssignmentSchema.safeParse({
+      params: { id },
+      body: { status: "published" },
+    });
     expect(result.success).toBe(false);
   });
 });

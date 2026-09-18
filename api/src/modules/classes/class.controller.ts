@@ -32,6 +32,20 @@ export async function getClassDetail(req: Request, res: Response): Promise<void>
   sendSuccess(res, cls);
 }
 
+export async function updateClass(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const classId = req.params.id as string;
+  const cls = await classService.updateClass(classId, user.id, user.role, req.body);
+  sendSuccess(res, cls);
+}
+
+export async function deleteClass(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const classId = req.params.id as string;
+  const result = await classService.deleteClass(classId, user.id, user.role);
+  sendSuccess(res, result);
+}
+
 export async function joinClass(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const result = await classService.joinClass(user.id, req.body.code);

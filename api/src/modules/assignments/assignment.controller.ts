@@ -41,6 +41,27 @@ export async function getAssignments(req: Request, res: Response): Promise<void>
   sendSuccess(res, assignments, 200, meta);
 }
 
+export async function getAssignment(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const assignment = await assignmentService.getAssignmentById(id, user.id, user.role);
+  sendSuccess(res, assignment);
+}
+
+export async function updateAssignment(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const assignment = await assignmentService.updateAssignment(id, user.id, user.role, req.body);
+  sendSuccess(res, assignment);
+}
+
+export async function deleteAssignment(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const result = await assignmentService.deleteAssignment(id, user.id, user.role);
+  sendSuccess(res, result);
+}
+
 export async function getAssignmentProgress(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;

@@ -7,6 +7,18 @@ export const CreateClassSchema = z.object({
   }),
 });
 
+export const UpdateClassSchema = z.object({
+  params: z.object({ id: z.string().min(1, "Thiếu ID lớp học") }),
+  body: z
+    .object({
+      name: z.string().min(2, "Tên lớp tối thiểu 2 ký tự").optional(),
+      description: z.string().optional(),
+    })
+    .refine((data) => data.name !== undefined || data.description !== undefined, {
+      message: "Cần cung cấp ít nhất một trường để cập nhật",
+    }),
+});
+
 export const JoinClassSchema = z.object({
   body: z.object({
     code: z.string().length(6, "Mã lớp gồm 6 ký tự"),
@@ -23,5 +35,6 @@ export const AddStudentSchema = z.object({
 });
 
 export type CreateClassBody = z.infer<typeof CreateClassSchema>["body"];
+export type UpdateClassBody = z.infer<typeof UpdateClassSchema>["body"];
 export type JoinClassBody = z.infer<typeof JoinClassSchema>["body"];
 export type AddStudentBody = z.infer<typeof AddStudentSchema>["body"];

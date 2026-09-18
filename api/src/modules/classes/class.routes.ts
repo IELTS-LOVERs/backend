@@ -3,7 +3,12 @@ import { authenticate } from "../../common/middlewares/auth.middleware.js";
 import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as classController from "./class.controller.js";
-import { AddStudentSchema, CreateClassSchema, JoinClassSchema } from "./class.validation.js";
+import {
+  AddStudentSchema,
+  CreateClassSchema,
+  JoinClassSchema,
+  UpdateClassSchema,
+} from "./class.validation.js";
 
 const router = Router();
 
@@ -23,6 +28,19 @@ router.post(
   classController.joinClass
 );
 router.get("/:id", authenticate, classController.getClassDetail);
+router.patch(
+  "/:id",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  validate(UpdateClassSchema),
+  classController.updateClass
+);
+router.delete(
+  "/:id",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  classController.deleteClass
+);
 router.post(
   "/:id/students",
   authenticate,
