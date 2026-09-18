@@ -2,7 +2,11 @@ import type { Request, Response } from "express";
 import { UnauthorizedError } from "../../common/errors/AppError.js";
 import { sendSuccess } from "../../common/utils/response.util.js";
 import * as attemptService from "./attempt.service.js";
-import type { AutosaveAnswersBody, StartAttemptBody } from "./attempt.validation.js";
+import type {
+  AutosaveAnswersBody,
+  GetMyAttemptsQuery,
+  StartAttemptBody,
+} from "./attempt.validation.js";
 
 function requireUser(req: Request): NonNullable<Request["user"]> {
   if (!req.user) {
@@ -46,6 +50,14 @@ export async function submit(req: Request, res: Response): Promise<void> {
 export async function getResult(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;
-  const result = await attemptService.getAttemptResult(id, user.id);
+  const result = await attemptService.getAttemptResult(id, user);
   sendSuccess(res, result);
 }
+
+export async function getMyAttempts(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const query = (req.query ?? {}) as unknown as GetMyAttemptsQuery;
+  const result = await attemptService.getMyAttempts(user.id, query);
+  sendSuccess(res, result);
+}
+

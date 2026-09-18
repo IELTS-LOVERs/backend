@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AutosaveAnswersSchema, StartAttemptSchema } from "./attempt.validation.js";
+import {
+  AutosaveAnswersSchema,
+  GetMyAttemptsSchema,
+  StartAttemptSchema,
+} from "./attempt.validation.js";
 
 describe("StartAttemptSchema", () => {
   it("accepts a start payload with only examId", () => {
@@ -68,3 +72,34 @@ describe("AutosaveAnswersSchema", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("GetMyAttemptsSchema", () => {
+  it("applies defaults for page and limit", () => {
+    const result = GetMyAttemptsSchema.safeParse({ query: {} });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.query.page).toBe(1);
+      expect(result.data.query.limit).toBe(10);
+    }
+  });
+
+  it("coerces string numbers for pagination", () => {
+    const result = GetMyAttemptsSchema.safeParse({
+      query: { page: "2", limit: "25", status: "submitted" },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.query.page).toBe(2);
+      expect(result.data.query.limit).toBe(25);
+      expect(result.data.query.status).toBe("submitted");
+    }
+  });
+
+  it("rejects invalid status", () => {
+    const result = GetMyAttemptsSchema.safeParse({
+      query: { status: "invalid_status" },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+

@@ -19,6 +19,7 @@ import {
   type IAttemptAnswer,
   type IAttemptScores,
 } from "./attempt.model.js";
+import type { GetMyAttemptsQuery } from "./attempt.validation.js";
 
 export interface CandidateExamQuestion {
   id: string;
@@ -582,11 +583,37 @@ export async function submitAttempt(
   };
 }
 
+export function canAccessAttemptResult(
+  attemptStudentId: string,
+  user: { id: string; role: string }
+): boolean {
+  if (user.role === "admin" || user.role === "teacher") {
+    return true;
+  }
+  return attemptStudentId === user.id;
+}
+
 export async function getAttemptResult(
   attemptId: string,
-  studentId: string
+  userOrStudentId: string | { id: string; role: string }
 ): Promise<AttemptResult> {
-  const attempt = await findOwnedAttempt(attemptId, studentId);
+  const attempt = await AttemptModel.findById(attemptId);
+
+  if (!attempt) {
+    throw new NotFoundError("Bài làm không tồn tại.");
+  }
+
+  const userId =
+    typeof userOrStudentId === "string" ? userOrStudentId : userOrStudentId.id;
+  const userRole =
+    typeof userOrStudentId === "string" ? "student" : userOrStudentId.role;
+
+  if (!canAccessAttemptResult(attempt.studentId.toString(), { id: userId, role: userRole })) {
+    throw new ForbiddenError(
+      "ATTEMPT_NOT_OWNED",
+      "Học sinh không có quyền truy cập bài làm này."
+    );
+  }
 
   if (attempt.status !== "submitted") {
     throw new BadRequestError("EXAM_NOT_SUBMITTED", "Bài thi chưa được nộp.");
@@ -646,3 +673,105 @@ export async function getAttemptResult(
     details,
   };
 }
+
+export interface MyAttemptExamSummary {
+  id: string;
+  title: string;
+  durationMinutes: number;
+  skills: string[];
+}
+
+export interface MyAttemptItem {
+  id: string;
+  exam: MyAttemptExamSummary | null;
+  assignmentId: string | null;
+  startedAt: Date;
+  expiresAt: Date;
+  submittedAt: Date | null;
+  status: AttemptStatus;
+  scores: IAttemptScores;
+  suspicious: boolean;
+}
+
+export interface MyAttemptsResult {
+  items: MyAttemptItem[];
+  pagination: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+export async function getMyAttempts(
+  studentId: string,
+  query: GetMyAttemptsQuery
+): Promise<MyAttemptsResult> {
+  const filter: Record<string, unknown> = {
+    studentId: new mongoose.Types.ObjectId(studentId),
+  };
+
+  if (query.status) {
+    filter.status = query.status;
+  }
+
+  if (query.examId && mongoose.isValidObjectId(query.examId)) {
+    filter.examId = new mongoose.Types.ObjectId(query.examId);
+  }
+
+  const page = query.page ?? 1;
+  const limit = query.limit ?? 10;
+  const skip = (page - 1) * limit;
+
+  const [total, attempts] = await Promise.all([
+    AttemptModel.countDocuments(filter),
+    AttemptModel.find(filter)
+      .populate("examId", "title durationMinutes sections.skill")
+      .sort({ startedAt: -1 })
+      .skip(skip)
+      .limit(limit),
+  ]);
+
+  const items: MyAttemptItem[] = attempts.map((attempt) => {
+    const examDoc = attempt.examId as unknown as {
+      _id: Types.ObjectId;
+      title?: string;
+      durationMinutes?: number;
+      sections?: { skill?: string }[];
+    } | null;
+
+    const examSummary: MyAttemptExamSummary | null = examDoc
+      ? {
+          id: examDoc._id.toString(),
+          title: examDoc.title ?? "",
+          durationMinutes: examDoc.durationMinutes ?? 0,
+          skills: Array.from(
+            new Set((examDoc.sections ?? []).map((s) => s.skill).filter(Boolean) as string[])
+          ),
+        }
+      : null;
+
+    return {
+      id: attempt._id.toString(),
+      exam: examSummary,
+      assignmentId: attempt.assignmentId ? attempt.assignmentId.toString() : null,
+      startedAt: attempt.startedAt,
+      expiresAt: attempt.expiresAt,
+      submittedAt: attempt.submittedAt ?? null,
+      status: attempt.status,
+      scores: serializeScores(attempt.scores),
+      suspicious: attempt.suspicious,
+    };
+  });
+
+  return {
+    items,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    },
+  };
+}
+

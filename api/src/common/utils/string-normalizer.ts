@@ -17,7 +17,7 @@ export function normalizeAnswer(input: string): string {
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/\s+/g, " ")
     .replace(/(?<!\d)\.|\.(?!\d)/g, "")
-    .replace(/[^\p{L}\p{N}\s'/.\-]+/gu, "")
+    .replace(/[^\p{L}\p{N}\s'/.-]+/gu, "")
     .trim();
 }
 

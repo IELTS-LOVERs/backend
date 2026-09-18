@@ -113,3 +113,120 @@ export async function logEvent(
     suspiciousFlag: attempt.suspicious || suspiciousNow,
   };
 }
+
+export interface ExamEventSummary {
+  totalEvents: number;
+  tabSwitchOrBlur: number;
+  fullscreenExit: number;
+  paste: number;
+  copy: number;
+  cut: number;
+  reload: number;
+  contextMenu: number;
+  suspicious: boolean;
+}
+
+export interface ExamEventItem {
+  id: string;
+  type: string;
+  timestamp: Date;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AttemptEventsResult {
+  attemptId: string;
+  suspicious: boolean;
+  summary: ExamEventSummary;
+  events: ExamEventItem[];
+}
+
+export function summarizeEvents(
+  events: { type: string }[],
+  isSuspicious: boolean
+): ExamEventSummary {
+  let tabSwitchOrBlur = 0;
+  let fullscreenExit = 0;
+  let paste = 0;
+  let copy = 0;
+  let cut = 0;
+  let reload = 0;
+  let contextMenu = 0;
+
+  for (const event of events) {
+    switch (event.type) {
+      case "TAB_SWITCH":
+      case "WINDOW_BLUR":
+        tabSwitchOrBlur += 1;
+        break;
+      case "FULLSCREEN_EXIT":
+        fullscreenExit += 1;
+        break;
+      case "PASTE":
+        paste += 1;
+        break;
+      case "COPY":
+        copy += 1;
+        break;
+      case "CUT":
+        cut += 1;
+        break;
+      case "RELOAD":
+        reload += 1;
+        break;
+      case "CONTEXT_MENU":
+        contextMenu += 1;
+        break;
+    }
+  }
+
+  return {
+    totalEvents: events.length,
+    tabSwitchOrBlur,
+    fullscreenExit,
+    paste,
+    copy,
+    cut,
+    reload,
+    contextMenu,
+    suspicious: isSuspicious,
+  };
+}
+
+export async function getAttemptEvents(
+  attemptId: string,
+  user: { id: string; role: string }
+): Promise<AttemptEventsResult> {
+  const attempt = await AttemptModel.findById(attemptId);
+
+  if (!attempt) {
+    throw new NotFoundError("Bài làm không tồn tại.");
+  }
+
+  if (user.role === "student" && attempt.studentId.toString() !== user.id) {
+    throw new ForbiddenError(
+      "ATTEMPT_NOT_OWNED",
+      "Bạn không có quyền truy cập sự kiện của bài thi này."
+    );
+  }
+
+  const rawEvents = await ExamEventModel.find({ attemptId: attempt._id }).sort({
+    timestamp: 1,
+  });
+
+  const summary = summarizeEvents(rawEvents, attempt.suspicious);
+
+  const events: ExamEventItem[] = rawEvents.map((e) => ({
+    id: e._id.toString(),
+    type: e.type,
+    timestamp: e.timestamp,
+    metadata: e.metadata as Record<string, unknown> | undefined,
+  }));
+
+  return {
+    attemptId: attempt._id.toString(),
+    suspicious: attempt.suspicious,
+    summary,
+    events,
+  };
+}
+

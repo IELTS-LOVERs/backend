@@ -14,6 +14,8 @@ router.post(
   validate(LogExamEventSchema),
   antiCheatController.logEvent
 );
+router.get("/events/:attemptId", authenticate, antiCheatController.getEvents);
+
 
 export { router as antiCheatRoutes };
 export default router;

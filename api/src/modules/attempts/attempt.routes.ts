@@ -2,8 +2,13 @@ import { Router } from "express";
 import { authenticate } from "../../common/middlewares/auth.middleware.js";
 import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
+import * as antiCheatController from "../anti-cheat/anti-cheat.controller.js";
 import * as attemptController from "./attempt.controller.js";
-import { AutosaveAnswersSchema, StartAttemptSchema } from "./attempt.validation.js";
+import {
+  AutosaveAnswersSchema,
+  GetMyAttemptsSchema,
+  StartAttemptSchema,
+} from "./attempt.validation.js";
 
 const router = Router();
 
@@ -14,6 +19,12 @@ router.post(
   validate(StartAttemptSchema),
   attemptController.start
 );
+router.get(
+  "/my",
+  authenticate,
+  validate(GetMyAttemptsSchema),
+  attemptController.getMyAttempts
+);
 router.get("/:id", authenticate, attemptController.getAttempt);
 router.patch(
   "/:id/answers",
@@ -23,6 +34,7 @@ router.patch(
 );
 router.post("/:id/submit", authenticate, attemptController.submit);
 router.get("/:id/result", authenticate, attemptController.getResult);
+router.get("/:id/events", authenticate, antiCheatController.getEvents);
 
 export { router as attemptRoutes };
 export default router;

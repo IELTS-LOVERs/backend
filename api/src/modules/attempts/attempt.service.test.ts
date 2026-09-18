@@ -4,6 +4,7 @@ import type { IExam } from "../exams/exam.model.js";
 import type { IAttemptAnswer } from "./attempt.model.js";
 import {
   buildCandidateExam,
+  canAccessAttemptResult,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
   gradeQuestions,
@@ -164,5 +165,31 @@ describe("collectExamQuestionBuckets", () => {
     expect(buckets.hasWriting).toBe(false);
     expect(buckets.listening).toHaveLength(1);
     expect(buckets.reading).toHaveLength(1);
+  });
+});
+
+describe("canAccessAttemptResult", () => {
+  it("allows admin to access any attempt result", () => {
+    expect(
+      canAccessAttemptResult("student-123", { id: "admin-1", role: "admin" })
+    ).toBe(true);
+  });
+
+  it("allows teacher to access any attempt result", () => {
+    expect(
+      canAccessAttemptResult("student-123", { id: "teacher-1", role: "teacher" })
+    ).toBe(true);
+  });
+
+  it("allows student to access their own attempt result", () => {
+    expect(
+      canAccessAttemptResult("student-123", { id: "student-123", role: "student" })
+    ).toBe(true);
+  });
+
+  it("denies student accessing another student's attempt result", () => {
+    expect(
+      canAccessAttemptResult("student-123", { id: "student-456", role: "student" })
+    ).toBe(false);
   });
 });

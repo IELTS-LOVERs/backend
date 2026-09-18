@@ -19,6 +19,7 @@ import {
 } from "./modules/grading/grading.routes.js";
 import { mediaRoutes } from "./modules/media/media.routes.js";
 import { antiCheatRoutes } from "./modules/anti-cheat/anti-cheat.routes.js";
+import { dashboardRoutes } from "./modules/dashboard/dashboard.routes.js";
 
 const app = express();
 
@@ -49,6 +50,8 @@ app.use("/api/grading", gradingRoutes);
 app.use("/api/writing-reviews", writingReviewRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/anti-cheat", antiCheatRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+
 
 app.use((_req, res) => {
   res.status(404).json({

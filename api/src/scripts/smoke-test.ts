@@ -415,8 +415,69 @@ async function main(): Promise<void> {
   );
   logStep("Bài đã chấm được loại khỏi danh sách chờ");
 
+  // 1. Giáo viên xem chi tiết bài làm của học sinh
+  const teacherResult = await request<ResultView>(`/api/attempts/${attemptId}/result`, {
+    token: teacherAuth.accessToken,
+  });
+  assert(
+    teacherResult.attemptId === attemptId,
+    "Giáo viên phải xem được kết quả bài làm của học sinh"
+  );
+  logStep("Giáo viên xem lại chi tiết bài làm đã nộp của học sinh");
+
+  // 2. Giáo viên xem chi tiết Anti-cheat logs
+  const antiCheatDetails = await request<{
+    suspicious: boolean;
+    summary: { totalEvents: number };
+  }>(`/api/attempts/${attemptId}/events`, {
+    token: teacherAuth.accessToken,
+  });
+  assert(
+    antiCheatDetails.summary.totalEvents > 0,
+    "Giáo viên phải xem được danh sách sự kiện anti-cheat"
+  );
+  logStep("Giáo viên xem chi tiết sự kiện vi phạm (Anti-cheat events)");
+
+  // 3. Học sinh xem lịch sử bài thi tự do
+  const myAttempts = await request<{ items: Array<{ id: string; status: string }> }>(
+    "/api/attempts/my",
+    {
+      token: studentAuth.accessToken,
+    }
+  );
+  assert(
+    myAttempts.items.some((item) => item.id === attemptId),
+    "Lịch sử thi của học sinh phải chứa bài thi vừa nộp"
+  );
+  logStep("Học sinh xem danh sách lịch sử thi (/api/attempts/my)");
+
+  // 4. Aggregated Dashboard Stats
+  const studentDashboard = await request<{
+    assignedCount: number;
+    submittedCount: number;
+  }>("/api/dashboard/student", {
+    token: studentAuth.accessToken,
+  });
+  assert(
+    typeof studentDashboard.submittedCount === "number",
+    "Student dashboard phải trả về thống kê hợp lệ"
+  );
+
+  const teacherDashboard = await request<{
+    totalClasses: number;
+    totalStudents: number;
+  }>("/api/dashboard/teacher", {
+    token: teacherAuth.accessToken,
+  });
+  assert(
+    typeof teacherDashboard.totalClasses === "number",
+    "Teacher dashboard phải trả về thống kê hợp lệ"
+  );
+  logStep("Truy vấn thành công Dashboard Aggregated Stats (Student & Teacher)");
+
   console.log("[smoke] Hoàn tất: toàn bộ luồng end-to-end chạy thành công.");
 }
+
 
 main().catch((error) => {
   console.error("[smoke] Thất bại:", error);
