@@ -30,6 +30,7 @@ export interface AssignmentSummary {
 
 export interface MyAssignment {
   id: string;
+  examId: string;
   examTitle: string;
   durationMinutes: number;
   deadline: Date | null;
@@ -424,6 +425,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
 
     return {
       id: entry.id,
+      examId: entry.examId,
       examTitle: entry.examTitle,
       durationMinutes: entry.durationMinutes,
       deadline: entry.deadline,
