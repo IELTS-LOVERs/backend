@@ -5,7 +5,7 @@ const SkillEnum = z.enum(["listening", "reading", "writing"]);
 const ExamSectionInputSchema = z.object({
   skill: SkillEnum,
   part: z.number().int().min(1).max(4),
-  title: z.string(),
+  title: z.string().optional().default(""),
   instructions: z.string().optional(),
   passageText: z.string().optional(),
   mediaIds: z.array(z.string()).optional(),

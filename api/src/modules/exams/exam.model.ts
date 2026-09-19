@@ -8,7 +8,7 @@ export type ExamStatus = "draft" | "published" | "closed";
 export interface IExamSection {
   skill: SkillType;
   part: number;
-  title: string;
+  title?: string;
   instructions?: string;
   passageText?: string;
   mediaIds?: Types.ObjectId[];
@@ -33,7 +33,7 @@ const ExamSectionSchema = new Schema<IExamSection>(
   {
     skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
     part: { type: Number, required: true },
-    title: { type: String, required: true },
+    title: { type: String, default: "" },
     instructions: { type: String },
     passageText: { type: String },
     mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],

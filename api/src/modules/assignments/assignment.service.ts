@@ -508,8 +508,16 @@ export async function getAssignmentsForTeacher(
     AssignmentModel.countDocuments(query),
   ]);
 
+  const mappedAssignments = assignments.map((doc: any) => {
+    const a = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
+    return {
+      ...a,
+      id: doc._id ? doc._id.toString() : doc.id || ''
+    };
+  });
+
   return {
-    assignments,
+    assignments: mappedAssignments,
     meta: {
       page,
       limit,

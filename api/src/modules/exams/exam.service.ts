@@ -94,11 +94,17 @@ interface PopulatedQuestion {
   updatedAt: Date;
 }
 
+export function getDefaultSectionTitle(skill: SkillType, part: number): string {
+  if (skill === 'reading') return `Passage ${part}`;
+  if (skill === 'writing') return `Task ${part}`;
+  return `Part ${part}`;
+}
+
 export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
   return sections.map((section) => ({
     skill: section.skill,
     part: section.part,
-    title: section.title,
+    title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
     instructions: section.instructions,
     passageText: section.passageText,
     mediaIds: section.mediaIds?.map((mediaId) => new mongoose.Types.ObjectId(mediaId)),

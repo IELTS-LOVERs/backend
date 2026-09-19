@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../../common/middlewares/auth.middleware.js";
 import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
-import { createRateLimiter } from "../../common/middlewares/rateLimiter.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as antiCheatController from "../anti-cheat/anti-cheat.controller.js";
 import * as attemptController from "./attempt.controller.js";
@@ -12,8 +11,6 @@ import {
 } from "./attempt.validation.js";
 
 const router = Router();
-
-const autosaveRateLimiter = createRateLimiter(120, 60 * 1000);
 
 router.post(
   "/",
@@ -32,7 +29,6 @@ router.get("/:id", authenticate, attemptController.getAttempt);
 router.patch(
   "/:id/answers",
   authenticate,
-  autosaveRateLimiter,
   validate(AutosaveAnswersSchema),
   attemptController.autosave
 );
