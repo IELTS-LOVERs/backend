@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import { UnauthorizedError } from "../../common/errors/AppError.js";
 import { sendSuccess } from "../../common/utils/response.util.js";
 import * as assignmentService from "./assignment.service.js";
-import type { ListAssignmentsQuery } from "./assignment.validation.js";
+import type { ListAssignmentsQuery, MyAssignmentsQuery } from "./assignment.validation.js";
 
 function requireUser(req: Request): NonNullable<Request["user"]> {
   if (!req.user) {
@@ -22,7 +22,11 @@ export async function createAssignment(req: Request, res: Response): Promise<voi
 
 export async function getMyAssignments(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
-  const assignments = await assignmentService.getMyAssignments(user.id);
+  const query = req.query as unknown as MyAssignmentsQuery;
+  const assignments = await assignmentService.getMyAssignments(user.id, {
+    classId: query.classId,
+    status: query.status,
+  });
   sendSuccess(res, assignments);
 }
 
@@ -34,6 +38,7 @@ export async function getAssignments(req: Request, res: Response): Promise<void>
     user.role,
     {
       classId: query.classId,
+      examId: query.examId,
       page: query.page,
       limit: query.limit,
     }

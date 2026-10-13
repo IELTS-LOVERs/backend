@@ -1,18 +1,40 @@
 import mongoose, { type Types } from "mongoose";
-import type { SkillType } from "../questions/question.model.js";
+import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
 
 const { Schema, model } = mongoose;
 
 export type ExamStatus = "draft" | "published" | "closed";
 
+export interface IQuestionItem {
+  _id: Types.ObjectId;
+  questionNumber: number;
+  prompt: string;
+  acceptedAnswers: string[];
+  points: number;
+  explanation?: string;
+  mediaIds?: Types.ObjectId[];
+}
+
+export interface IQuestionGroup {
+  _id: Types.ObjectId;
+  groupType: QuestionGroupType;
+  instructions: string;
+  config: Record<string, unknown>;
+  questions: IQuestionItem[];
+}
+
 export interface IExamSection {
+  _id: Types.ObjectId;
   skill: SkillType;
   part: number;
   title?: string;
   instructions?: string;
   passageText?: string;
+  transcript?: string;
   mediaIds?: Types.ObjectId[];
-  questionIds: Types.ObjectId[];
+  questionGroups: IQuestionGroup[];
+  /** @deprecated Use questionGroups instead. Kept for backward compatibility. */
+  questionIds?: Types.ObjectId[];
 }
 
 export interface IExam extends mongoose.Document {
@@ -29,17 +51,41 @@ export interface IExam extends mongoose.Document {
   updatedAt: Date;
 }
 
+const QuestionItemSchema = new Schema<IQuestionItem>(
+  {
+    questionNumber: { type: Number, required: true },
+    prompt: { type: String, required: true },
+    acceptedAnswers: [{ type: String, trim: true }],
+    points: { type: Number, default: 1 },
+    explanation: { type: String },
+    mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],
+  },
+  { _id: true }
+);
+
+const QuestionGroupSchema = new Schema<IQuestionGroup>(
+  {
+    groupType: { type: String, required: true },
+    instructions: { type: String, default: "" },
+    config: { type: Schema.Types.Mixed, default: {} },
+    questions: [QuestionItemSchema],
+  },
+  { _id: true }
+);
+
 const ExamSectionSchema = new Schema<IExamSection>(
   {
-    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
+    skill: { type: String, enum: ["listening", "reading", "writing", "speaking"], required: true },
     part: { type: Number, required: true },
     title: { type: String, default: "" },
     instructions: { type: String },
     passageText: { type: String },
+    transcript: { type: String },
     mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],
+    questionGroups: [QuestionGroupSchema],
     questionIds: [{ type: Schema.Types.ObjectId, ref: "Question" }],
   },
-  { _id: false }
+  { _id: true }
 );
 
 const ExamSchema = new Schema<IExam>(

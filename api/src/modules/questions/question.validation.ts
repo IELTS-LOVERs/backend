@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const SkillEnum = z.enum(["listening", "reading", "writing"]);
+const SkillEnum = z.enum(["listening", "reading", "writing", "speaking"]);
 
 export const CreateQuestionSchema = z.object({
   body: z.object({

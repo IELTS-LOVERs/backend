@@ -6,6 +6,7 @@ import * as assignmentController from "./assignment.controller.js";
 import {
   CreateAssignmentSchema,
   ListAssignmentsQuerySchema,
+  MyAssignmentsQuerySchema,
   UpdateAssignmentSchema,
 } from "./assignment.validation.js";
 
@@ -29,6 +30,7 @@ router.get(
   "/my",
   authenticate,
   requireRoles("student"),
+  validate(MyAssignmentsQuerySchema),
   assignmentController.getMyAssignments
 );
 router.get(

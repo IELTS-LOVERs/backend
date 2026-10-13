@@ -35,7 +35,7 @@ const TaskGradeSchema = new Schema<ITaskGrade>(
 
 const WritingReviewSchema = new Schema<IWritingReview>(
   {
-    attemptId: { type: Schema.Types.ObjectId, ref: "Attempt", required: true, unique: true },
+    attemptId: { type: Schema.Types.ObjectId, ref: "Attempt", required: true },
     studentId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     teacherId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     task1: { type: TaskGradeSchema, required: false },

@@ -82,6 +82,13 @@ interface PopulatedWritingQuestion {
 interface PopulatedGradingSection {
   skill?: string;
   questionIds?: unknown[];
+  questionGroups?: Array<{
+    groupType?: string;
+    questions?: Array<{
+      _id: Types.ObjectId;
+      prompt?: string;
+    }>;
+  }>;
 }
 
 interface PopulatedGradingExam extends OwnershipExam {
@@ -219,6 +226,33 @@ export async function getAttemptForGrading(
   const tasksByNumber = new Map<1 | 2, GradingWritingTask>();
 
   for (const section of exam?.sections ?? []) {
+    // New path: question groups
+    const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
+    if (hasGroups) {
+      for (const group of section.questionGroups!) {
+        const task: 1 | 2 | null =
+          group.groupType === "writing_task_1" ? 1 : group.groupType === "writing_task_2" ? 2 : null;
+        if (task === null || tasksByNumber.has(task)) continue;
+
+        const firstQ = group.questions?.[0];
+        if (!firstQ) continue;
+
+        const answer = attempt.answers.find(
+          (candidate) => candidate.questionId.toString() === firstQ._id.toString()
+        );
+        const studentContent = answer?.value ?? "";
+
+        tasksByNumber.set(task, {
+          task,
+          prompt: firstQ.prompt ?? "",
+          studentContent,
+          wordCount: countWords(studentContent),
+        });
+      }
+      continue;
+    }
+
+    // Legacy path: populated questionIds
     for (const item of section.questionIds ?? []) {
       if (!isPopulatedWritingQuestion(item)) continue;
 

@@ -5,10 +5,23 @@ import { ensureBucket } from "./config/minio.js";
 
 async function bootstrap(): Promise<void> {
   await connectDB();
-  await ensureBucket(env.MINIO_BUCKET);
 
-  app.listen(env.PORT, env.HOST, () => {
-    console.log(`[server] Server running on http://${env.HOST}:${env.PORT}`);
+  try {
+    await Promise.race([
+      ensureBucket(env.MINIO_BUCKET),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("MinIO connection timed out (5s)")), 5000),
+      ),
+    ]);
+  } catch (error) {
+    console.warn(
+      "[minio] ⚠ Could not connect to MinIO — file uploads will be unavailable.",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  app.listen(env.PORT, () => {
+    console.log(`[server] Server running on http://localhost:${env.PORT}`);
   });
 }
 

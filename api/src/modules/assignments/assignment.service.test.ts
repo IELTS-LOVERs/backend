@@ -166,7 +166,7 @@ describe("getAssignmentProgress", () => {
       teacherId,
       examId: { _id: examId, title: "Mock Exam" },
       classId: { _id: classId, name: "Class 1", code: "CLS1" },
-      deadline: new Date("2026-10-01"),
+      deadline: new Date(Date.now() + 86_400_000),
     };
 
     vi.spyOn(AssignmentModel, "findById").mockReturnValue({

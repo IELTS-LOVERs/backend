@@ -4,9 +4,24 @@ import { AssignmentModel } from "../assignments/assignment.model.js";
 import { buildCandidateExam, type CandidateExam } from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
-import type { SkillType } from "../questions/question.model.js";
-import { ExamModel, type ExamStatus, type IExam, type IExamSection } from "./exam.model.js";
-import type { CreateExamBody, ExamSectionInput, UpdateExamBody } from "./exam.validation.js";
+import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
+import { mapLegacyTypeToGroupType } from "../../config/constants.js";
+import {
+  ExamModel,
+  type ExamStatus,
+  type IExam,
+  type IExamSection,
+  type IQuestionGroup,
+  type IQuestionItem,
+} from "./exam.model.js";
+import type {
+  CreateExamBody,
+  ExamSectionInput,
+  QuestionGroupInput,
+  QuestionItemInput,
+  UpdateExamBody,
+  UpdateExamMetadataBody,
+} from "./exam.validation.js";
 
 export interface ExamSummary {
   id: string;
@@ -41,22 +56,48 @@ export interface SerializedQuestion {
   updatedAt: Date;
 }
 
+export interface SerializedQuestionItem {
+  id: string;
+  questionNumber: number;
+  prompt: string;
+  acceptedAnswers: string[];
+  points: number;
+  explanation: string | null;
+  mediaIds: string[];
+}
+
+export interface SerializedQuestionGroup {
+  id: string;
+  groupType: QuestionGroupType;
+  instructions: string;
+  config: Record<string, unknown>;
+  questions: SerializedQuestionItem[];
+}
+
 export interface ExamSectionDetail {
+  id: string;
   skill: SkillType;
   part: number;
   title: string;
   instructions: string | null;
   passageText: string | null;
+  transcript: string | null;
   mediaIds: string[];
+  questionGroups: SerializedQuestionGroup[];
+  /** @deprecated Legacy field. Empty when using questionGroups. */
   questionIds: string[];
+  /** @deprecated Legacy field. Empty when using questionGroups. */
   questions: SerializedQuestion[];
 }
 
 export interface ExamDetail {
   id: string;
   title: string;
+  description: string | null;
   durationMinutes: number;
   status: ExamStatus;
+  openAt: Date | null;
+  closeAt: Date | null;
   sections: ExamSectionDetail[];
 }
 
@@ -97,24 +138,80 @@ interface PopulatedQuestion {
 export function getDefaultSectionTitle(skill: SkillType, part: number): string {
   if (skill === 'reading') return `Passage ${part}`;
   if (skill === 'writing') return `Task ${part}`;
+  if (skill === 'speaking') return `Part ${part}`;
   return `Part ${part}`;
 }
 
+/** Check if a section uses the new questionGroups format */
+export function sectionUsesGroups(section: IExamSection): boolean {
+  return Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
+}
+
+function toSafeObjectId(id: unknown): Types.ObjectId | undefined {
+  if (!id) return undefined;
+  const str = String(id).trim();
+  if (mongoose.Types.ObjectId.isValid(str) && /^[0-9a-fA-F]{24}$/.test(str)) {
+    return new mongoose.Types.ObjectId(str);
+  }
+  return undefined;
+}
+
+function mapQuestionItemInput(item: QuestionItemInput): Partial<IQuestionItem> {
+  const safeId = toSafeObjectId(item._id);
+  const mediaIds = (item.mediaIds ?? [])
+    .map(toSafeObjectId)
+    .filter((id): id is Types.ObjectId => id !== undefined);
+
+  return {
+    ...(safeId ? { _id: safeId } : {}),
+    questionNumber: item.questionNumber,
+    prompt: item.prompt ?? "",
+    acceptedAnswers: item.acceptedAnswers ?? [],
+    points: item.points ?? 1,
+    explanation: item.explanation ?? undefined,
+    mediaIds,
+  };
+}
+
+function mapQuestionGroupInput(group: QuestionGroupInput): Partial<IQuestionGroup> {
+  const safeId = toSafeObjectId(group._id);
+  return {
+    ...(safeId ? { _id: safeId } : {}),
+    groupType: group.groupType as QuestionGroupType,
+    instructions: group.instructions ?? "",
+    config: group.config ?? {},
+    questions: (group.questions ?? []).map(mapQuestionItemInput) as IQuestionItem[],
+  };
+}
+
 export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
-  return sections.map((section) => ({
-    skill: section.skill,
-    part: section.part,
-    title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
-    instructions: section.instructions,
-    passageText: section.passageText,
-    mediaIds: section.mediaIds?.map((mediaId) => new mongoose.Types.ObjectId(mediaId)),
-    questionIds: section.questionIds.map((questionId) => new mongoose.Types.ObjectId(questionId)),
-  }));
+  return sections.map((section) => {
+    const safeId = toSafeObjectId(section._id);
+    const mediaIds = (section.mediaIds ?? [])
+      .map(toSafeObjectId)
+      .filter((mediaId): mediaId is Types.ObjectId => mediaId !== undefined);
+    const questionIds = (section.questionIds ?? [])
+      .map(toSafeObjectId)
+      .filter((questionId): questionId is Types.ObjectId => questionId !== undefined);
+
+    return {
+      ...(safeId ? { _id: safeId } : {}),
+      skill: section.skill,
+      part: section.part,
+      title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
+      instructions: section.instructions ?? undefined,
+      passageText: section.passageText ?? undefined,
+      transcript: section.transcript ?? undefined,
+      mediaIds,
+      questionGroups: (section.questionGroups ?? []).map(mapQuestionGroupInput) as IQuestionGroup[],
+      questionIds,
+    } as IExamSection;
+  });
 }
 
 export function serializeQuestion(question: PopulatedQuestion): SerializedQuestion {
   return {
-    id: question._id.toString(),
+    id: question._id?.toString() ?? "",
     skill: question.skill,
     type: question.type,
     part: question.part,
@@ -124,10 +221,32 @@ export function serializeQuestion(question: PopulatedQuestion): SerializedQuesti
     acceptedAnswers: question.acceptedAnswers,
     points: question.points,
     explanation: question.explanation ?? null,
-    mediaIds: question.mediaIds.map((mediaId) => mediaId.toString()),
-    createdBy: question.createdBy.toString(),
+    mediaIds: (question.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
+    createdBy: question.createdBy?.toString() ?? "",
     createdAt: question.createdAt,
     updatedAt: question.updatedAt,
+  };
+}
+
+function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
+  return {
+    id: item._id?.toString() ?? "",
+    questionNumber: item.questionNumber,
+    prompt: item.prompt ?? "",
+    acceptedAnswers: item.acceptedAnswers ?? [],
+    points: item.points ?? 1,
+    explanation: item.explanation ?? null,
+    mediaIds: (item.mediaIds ?? []).map((id) => id?.toString() ?? "").filter(Boolean),
+  };
+}
+
+function serializeQuestionGroup(group: IQuestionGroup): SerializedQuestionGroup {
+  return {
+    id: group._id?.toString() ?? "",
+    groupType: group.groupType,
+    instructions: group.instructions ?? "",
+    config: group.config ?? {},
+    questions: (group.questions ?? []).map(serializeQuestionItem),
   };
 }
 
@@ -138,7 +257,7 @@ export function assertOwnership(
 ): void {
   if (role === "admin") return;
 
-  if (exam.createdBy.toString() !== userId) {
+  if (exam.createdBy?.toString() !== userId) {
     throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 }
@@ -157,7 +276,7 @@ async function findOwnedExam(id: string, userId: string, role: string): Promise<
 export async function create(data: CreateExamBody, userId: string): Promise<ExamSummary> {
   const exam = await ExamModel.create({
     title: data.title,
-    description: data.description,
+    description: data.description ?? undefined,
     durationMinutes: data.durationMinutes,
     sections: mapSections(data.sections),
     status: "draft",
@@ -255,23 +374,45 @@ export async function getById(
     };
   }
 
-  if (userId && role && role !== "admin" && exam.createdBy.toString() !== userId) {
+  if (userId && role && role !== "admin" && exam.createdBy?.toString() !== userId) {
     throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 
   const sections: ExamSectionDetail[] = exam.sections.map((section) => {
+    const usesGroups = sectionUsesGroups(section);
+
+    if (usesGroups) {
+      return {
+        id: section._id?.toString() ?? "",
+        skill: section.skill,
+        part: section.part,
+        title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
+        instructions: section.instructions ?? null,
+        passageText: section.passageText ?? null,
+        transcript: section.transcript ?? null,
+        mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
+        questionGroups: (section.questionGroups ?? []).map(serializeQuestionGroup),
+        questionIds: [],
+        questions: [],
+      };
+    }
+
+    // Legacy path: questionIds populated
     const rawQuestions = section.questionIds as unknown as (PopulatedQuestion | null)[] | undefined;
     const questions = (rawQuestions ?? [])
       .filter((question): question is PopulatedQuestion => question !== null)
       .map(serializeQuestion);
 
     return {
+      id: section._id?.toString() ?? "",
       skill: section.skill,
       part: section.part,
-      title: section.title,
+      title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
       instructions: section.instructions ?? null,
       passageText: section.passageText ?? null,
-      mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId.toString()),
+      transcript: section.transcript ?? null,
+      mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
+      questionGroups: [],
       questionIds: questions.map((question) => question.id),
       questions,
     };
@@ -280,8 +421,11 @@ export async function getById(
   return {
     id: exam._id.toString(),
     title: exam.title,
+    description: exam.description ?? null,
     durationMinutes: exam.durationMinutes,
     status: exam.status,
+    openAt: exam.openAt ?? null,
+    closeAt: exam.closeAt ?? null,
     sections,
   };
 }
@@ -302,11 +446,28 @@ export async function update(
   }
 
   if (data.title !== undefined) exam.title = data.title;
-  if (data.description !== undefined) exam.description = data.description;
+  if (data.description !== undefined) exam.description = data.description ?? undefined;
   if (data.durationMinutes !== undefined) exam.durationMinutes = data.durationMinutes;
   if (data.sections !== undefined) exam.sections = mapSections(data.sections);
-  if (data.openAt !== undefined) exam.openAt = new Date(data.openAt);
-  if (data.closeAt !== undefined) exam.closeAt = new Date(data.closeAt);
+  if (data.openAt !== undefined) exam.openAt = data.openAt ? new Date(data.openAt) : undefined;
+  if (data.closeAt !== undefined) exam.closeAt = data.closeAt ? new Date(data.closeAt) : undefined;
+
+  await exam.save();
+}
+
+/** Allow editing metadata (title, description, open/close times) on published exams */
+export async function updateMetadata(
+  id: string,
+  data: UpdateExamMetadataBody,
+  userId: string,
+  role: string
+): Promise<void> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  if (data.title !== undefined) exam.title = data.title;
+  if (data.description !== undefined) exam.description = data.description ?? undefined;
+  if (data.openAt !== undefined) exam.openAt = data.openAt ? new Date(data.openAt) : undefined;
+  if (data.closeAt !== undefined) exam.closeAt = data.closeAt ? new Date(data.closeAt) : undefined;
 
   await exam.save();
 }
@@ -347,7 +508,9 @@ export async function clone(
       title: section.title,
       instructions: section.instructions,
       passageText: section.passageText,
+      transcript: section.transcript,
       mediaIds: section.mediaIds,
+      questionGroups: section.questionGroups,
       questionIds: section.questionIds,
     })),
     status: "draft",
@@ -359,6 +522,21 @@ export async function clone(
   return { id: cloned._id.toString(), title: cloned.title, status: cloned.status };
 }
 
+/** Count total questions across all sections, supporting both formats */
+function countExamQuestions(exam: IExam): number {
+  let count = 0;
+  for (const section of exam.sections) {
+    if (sectionUsesGroups(section)) {
+      for (const group of section.questionGroups) {
+        count += group.questions.length;
+      }
+    } else {
+      count += (section.questionIds ?? []).length;
+    }
+  }
+  return count;
+}
+
 export async function publish(
   id: string,
   userId: string,
@@ -366,20 +544,116 @@ export async function publish(
 ): Promise<{ id: string; status: ExamStatus }> {
   const exam = await findOwnedExam(id, userId, role);
 
-  if (
-    exam.sections.length === 0 ||
-    exam.sections.every((s) => s.questionIds.length === 0)
-  ) {
+  if (exam.sections.length === 0 || countExamQuestions(exam) === 0) {
     throw new BadRequestError(
       "EXAM_EMPTY",
       "Đề thi phải có ít nhất một câu hỏi để xuất bản."
     );
   }
 
+  if (exam.durationMinutes !== undefined && (exam.durationMinutes < 10 || exam.durationMinutes > 180)) {
+    throw new BadRequestError(
+      "EXAM_INVALID_DURATION",
+      "Thời lượng đề thi phải từ 10 đến 180 phút."
+    );
+  }
+
+  if (exam.openAt && exam.closeAt && exam.openAt >= exam.closeAt) {
+    throw new BadRequestError(
+      "EXAM_INVALID_DATES",
+      "Thời gian mở đề thi phải trước thời gian đóng đề thi."
+    );
+  }
+
+  for (const section of exam.sections) {
+    if (sectionUsesGroups(section)) {
+      for (const group of section.questionGroups) {
+        if (group.questions.length === 0) {
+          throw new BadRequestError(
+            "EXAM_GROUP_EMPTY",
+            `Nhóm câu hỏi trong phần ${section.title || section.part} không được để trống.`
+          );
+        }
+        if (section.skill !== "writing" && section.skill !== "speaking") {
+          for (const q of group.questions) {
+            if (!q.acceptedAnswers || q.acceptedAnswers.length === 0) {
+              throw new BadRequestError(
+                "EXAM_QUESTION_MISSING_ANSWER",
+                `Câu hỏi số ${q.questionNumber} chưa có đáp án đúng.`
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+
   exam.status = "published";
   await exam.save();
 
   return { id: exam._id.toString(), status: exam.status };
+}
+
+export async function migrateExamToGroups(
+  id: string,
+  userId: string,
+  role: string
+): Promise<{ id: string; message: string; migratedSections: number }> {
+  const exam = await findOwnedExam(id, userId, role);
+  await exam.populate("sections.questionIds");
+
+  let migratedSections = 0;
+
+  for (const section of exam.sections) {
+    if (sectionUsesGroups(section)) continue;
+
+    const rawQuestions = section.questionIds as unknown as (PopulatedQuestion | null)[] | undefined;
+    const questions = (rawQuestions ?? []).filter(
+      (q): q is PopulatedQuestion => q !== null && typeof q === "object" && "_id" in q
+    );
+
+    if (questions.length === 0) continue;
+
+    const groups: IQuestionGroup[] = [];
+    let currentGroup: IQuestionGroup | null = null;
+    let qNumber = 1;
+
+    for (const q of questions) {
+      const groupType = mapLegacyTypeToGroupType(q.type) as QuestionGroupType;
+
+      if (!currentGroup || currentGroup.groupType !== groupType) {
+        currentGroup = {
+          _id: new mongoose.Types.ObjectId(),
+          groupType,
+          instructions: q.content || "",
+          config: (q.data as Record<string, unknown>) ?? {},
+          questions: [],
+        };
+        groups.push(currentGroup);
+      }
+
+      currentGroup.questions.push({
+        _id: new mongoose.Types.ObjectId(),
+        questionNumber: qNumber++,
+        prompt: q.prompt,
+        acceptedAnswers: q.acceptedAnswers ?? [],
+        points: q.points ?? 1,
+        explanation: q.explanation,
+        mediaIds: q.mediaIds,
+      });
+    }
+
+    section.questionGroups = groups;
+    migratedSections++;
+  }
+
+  await exam.save();
+
+  return {
+    id: exam._id.toString(),
+    message: `Đã chuyển đổi ${migratedSections} phần thi sang cấu trúc nhóm câu hỏi.`,
+    migratedSections,
+  };
 }
 
 export async function unpublish(

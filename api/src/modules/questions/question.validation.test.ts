@@ -27,7 +27,7 @@ describe("CreateQuestionSchema", () => {
 
   it("rejects an invalid skill and out-of-range part", () => {
     expect(
-      CreateQuestionSchema.safeParse({ body: { ...validBody, skill: "speaking" } }).success
+      CreateQuestionSchema.safeParse({ body: { ...validBody, skill: "invalid_skill" } }).success
     ).toBe(false);
     expect(CreateQuestionSchema.safeParse({ body: { ...validBody, part: 5 } }).success).toBe(false);
   });

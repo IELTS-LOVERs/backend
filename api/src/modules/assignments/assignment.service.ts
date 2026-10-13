@@ -36,9 +36,15 @@ export interface MyAssignment {
   deadline: Date | null;
   submissionStatus: SubmissionStatus;
   teacherName: string;
+  classId: string | null;
   className: string | null;
   attemptId: string | null;
   scores: IAttemptScores | null;
+}
+
+export interface MyAssignmentsFilters {
+  classId?: string;
+  status?: SubmissionStatus | "all";
 }
 
 export interface AssignmentDetail {
@@ -346,14 +352,26 @@ export async function deleteAssignment(
   return { message: "Đã xóa bài tập thành công" };
 }
 
-export async function getMyAssignments(studentId: string): Promise<MyAssignment[]> {
+export async function getMyAssignments(
+  studentId: string,
+  filters: MyAssignmentsFilters = {}
+): Promise<MyAssignment[]> {
   const classes = await ClassModel.find({ students: studentId }).select("_id");
   const classIds = classes.map((cls) => cls._id);
 
-  const assignments = await AssignmentModel.find({
-    status: "active",
-    $or: [{ classId: { $in: classIds } }, { studentId }],
-  })
+  // REQ-001: student chỉ được lọc theo lớp mình đang học.
+  if (filters.classId && !classIds.some((id) => id.toString() === filters.classId)) {
+    throw new ForbiddenError("FORBIDDEN", "Bạn không có quyền truy cập bài tập của lớp này.");
+  }
+
+  const assignmentQuery: Record<string, unknown> = filters.classId
+    ? { status: "active", classId: new mongoose.Types.ObjectId(filters.classId) }
+    : {
+        status: "active",
+        $or: [{ classId: { $in: classIds } }, { studentId }],
+      };
+
+  const assignments = await AssignmentModel.find(assignmentQuery)
     .populate("examId", "title durationMinutes")
     .populate("teacherId", "fullName")
     .populate("classId", "name")
@@ -366,6 +384,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
     durationMinutes: number;
     deadline: Date | null;
     teacherName: string;
+    classId: string | null;
     className: string | null;
   }> = [];
 
@@ -384,6 +403,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
       durationMinutes: exam.durationMinutes,
       deadline: assignment.deadline ?? null,
       teacherName: teacher?.fullName ?? "",
+      classId: cls?._id ? cls._id.toString() : null,
       className: cls?.name ?? null,
     });
   }
@@ -410,7 +430,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
     }))
   );
 
-  return entries.map((entry) => {
+  const result: MyAssignment[] = entries.map((entry) => {
     const candidates = attempts.filter(
       (attempt) =>
         attempt.assignmentId?.toString() === entry.id ||
@@ -432,6 +452,7 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
       submissionStatus:
         resolvedStatus === "not_started" && deadlinePassed ? "expired" : resolvedStatus,
       teacherName: entry.teacherName,
+      classId: entry.classId,
       className: entry.className,
       attemptId: selected ? selected._id.toString() : null,
       scores:
@@ -440,6 +461,13 @@ export async function getMyAssignments(studentId: string): Promise<MyAssignment[
           : null,
     };
   });
+
+  // REQ-001: lọc theo trạng thái nộp nếu client yêu cầu.
+  if (filters.status && filters.status !== "all") {
+    return result.filter((item) => item.submissionStatus === filters.status);
+  }
+
+  return result;
 }
 
 export interface TeacherAssignmentOverview {
@@ -480,12 +508,12 @@ export interface AssignmentProgressResult {
 export async function getAssignmentsForTeacher(
   teacherId: string,
   role: string,
-  filters: { classId?: string; page: number; limit: number }
+  filters: { classId?: string; examId?: string; page: number; limit: number }
 ): Promise<{
   assignments: unknown[];
   meta: { page: number; limit: number; total: number; totalPages: number };
 }> {
-  const { classId, page, limit } = filters;
+  const { classId, examId, page, limit } = filters;
   const query: Record<string, unknown> = {};
 
   if (role !== "admin") {
@@ -494,6 +522,10 @@ export async function getAssignmentsForTeacher(
 
   if (classId) {
     query.classId = classId;
+  }
+
+  if (examId) {
+    query.examId = examId;
   }
 
   const skip = (page - 1) * limit;
@@ -510,9 +542,15 @@ export async function getAssignmentsForTeacher(
 
   const mappedAssignments = assignments.map((doc: any) => {
     const a = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
+    const examObj = a.examId && typeof a.examId === 'object' ? a.examId : null;
+    const classObj = a.classId && typeof a.classId === 'object' ? a.classId : null;
     return {
       ...a,
-      id: doc._id ? doc._id.toString() : doc.id || ''
+      id: doc._id ? doc._id.toString() : doc.id || '',
+      examTitle: a.examTitle ?? examObj?.title ?? '',
+      className: a.className ?? classObj?.name ?? null,
+      targetLabel: a.targetLabel ?? classObj?.name ?? '—',
+      stats: a.stats ?? { assigned: 0, submitted: 0, inProgress: 0 },
     };
   });
 

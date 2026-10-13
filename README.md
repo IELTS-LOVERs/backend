@@ -148,7 +148,7 @@ Key environment variables:
 | `MINIO_BUCKET` | Default storage bucket | `ielts-media` |
 | `PUBLIC_MEDIA_URL` | Public base URL for media assets | `http://localhost:9000/ielts-media` |
 | `EXAM_GRACE_PERIOD_SECONDS`| Network delay buffer for submit/autosave | `15` |
-| `REQUIRE_ASSIGNMENT_FOR_ATTEMPT`| Require a valid assignment before starting an attempt | `false` |
+| `REQUIRE_ASSIGNMENT_FOR_ATTEMPT`| Require a valid assignment before starting an attempt | `false` (local) / `true` (docker-compose production) |
 | `ANTI_CHEAT_TAB_SWITCH_THRESHOLD`| Max tab switches before flagging | `5` |
 | `ANTI_CHEAT_FULLSCREEN_EXIT_THRESHOLD`| Max fullscreen exits before flagging | `2` |
 | `ANTI_CHEAT_PASTE_THRESHOLD`| Max paste occurrences before flagging | `3` |

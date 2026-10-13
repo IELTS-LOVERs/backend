@@ -45,7 +45,7 @@ describe("CreateExamSchema", () => {
       CreateExamSchema.safeParse({
         body: {
           ...validBody,
-          sections: [{ skill: "speaking", part: 1, title: "Section 1" }],
+          sections: [{ skill: "invalid_skill", part: 1, title: "Section 1" }],
         },
       }).success
     ).toBe(false);

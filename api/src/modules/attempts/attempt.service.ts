@@ -11,12 +11,16 @@ import { logger } from "../../common/utils/logger.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
 import { AssignmentModel, type IAssignment } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
-import { ExamModel, type IExam } from "../exams/exam.model.js";
+import {
+  ExamModel,
+  type IExam,
+  type IQuestionGroup,
+} from "../exams/exam.model.js";
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
 import "../questions/question.model.js";
 import "../media/media.model.js";
-import type { SkillType } from "../questions/question.model.js";
+import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
 import {
   AttemptModel,
   type AttemptStatus,
@@ -45,14 +49,36 @@ export interface CandidateExamQuestion {
   media: CandidateMediaItem[];
 }
 
+export interface CandidateQuestionItem {
+  id: string;
+  questionNumber: number;
+  prompt: string;
+  points: number;
+  mediaIds: string[];
+  media: CandidateMediaItem[];
+}
+
+export interface CandidateQuestionGroup {
+  id: string;
+  groupType: QuestionGroupType;
+  instructions: string;
+  config: Record<string, unknown>;
+  questions: CandidateQuestionItem[];
+}
+
 export interface CandidateExamSection {
+  id: string;
   skill: SkillType;
   part: number;
   title: string;
   instructions: string | null;
   passageText: string | null;
+  transcript: string | null;
   mediaIds: string[];
   media: CandidateMediaItem[];
+  /** New: question groups with structured data */
+  questionGroups: CandidateQuestionGroup[];
+  /** Legacy: flat question list (empty when using groups) */
   questions: CandidateExamQuestion[];
 }
 
@@ -100,6 +126,8 @@ export interface SubmitAttemptResult {
 
 export interface ResultQuestionDetail {
   questionId: string;
+  questionNumber?: number;
+  groupType?: string;
   studentAnswer: string | null;
   acceptedAnswers: string[];
   isCorrect: boolean;
@@ -126,6 +154,7 @@ export interface AttemptWritingReview {
 
 export interface AttemptResult {
   attemptId: string;
+  examId: string;
   status: AttemptStatus;
   scores: IAttemptScores;
   writingReview: AttemptWritingReview | null;
@@ -147,13 +176,16 @@ export interface RawPopulatedQuestion {
 }
 
 export interface RawPopulatedSection {
+  _id?: Types.ObjectId;
   skill: SkillType;
   part: number;
   title: string;
   instructions?: string;
   passageText?: string;
+  transcript?: string;
   mediaIds?: unknown[];
   questionIds?: unknown[];
+  questionGroups?: IQuestionGroup[];
 }
 
 export interface RawExamObject {
@@ -168,12 +200,25 @@ export interface GradableQuestion {
   points?: number;
 }
 
+export interface GradableGroupQuestion {
+  _id: Types.ObjectId;
+  questionNumber: number;
+  acceptedAnswers: string[];
+  points: number;
+  groupConfig: Record<string, unknown>;
+  groupType: QuestionGroupType;
+}
+
 export interface ExamQuestionBuckets {
-  listening: RawPopulatedQuestion[];
-  reading: RawPopulatedQuestion[];
+  listening: GradableQuestion[];
+  reading: GradableQuestion[];
   hasListening: boolean;
   hasReading: boolean;
   hasWriting: boolean;
+  /** New: group-based questions for grading with word-count support */
+  listeningGrouped: GradableGroupQuestion[];
+  readingGrouped: GradableGroupQuestion[];
+  usesGroups: boolean;
 }
 
 function isPopulatedQuestion(value: unknown): value is RawPopulatedQuestion {
@@ -224,8 +269,16 @@ export function computeRemainingSeconds(
   return Math.max(0, Math.floor((expiresAt.getTime() - now) / 1000));
 }
 
+/** Collect all question IDs from a candidate exam (supports both formats) */
 export function collectCandidateQuestionIds(exam: CandidateExam): string[] {
-  return exam.sections.flatMap((section) => section.questions.map((question) => question.id));
+  return exam.sections.flatMap((section) => {
+    if (section.questionGroups && section.questionGroups.length > 0) {
+      return section.questionGroups.flatMap((group) =>
+        group.questions.map((q) => q.id)
+      );
+    }
+    return (section.questions ?? []).map((question) => question.id);
+  });
 }
 
 export function shuffleQuestionIds(questionIds: string[], seed: number): string[] {
@@ -266,10 +319,16 @@ export function applyQuestionOrder(exam: CandidateExam, order: string[]): Candid
   };
 }
 
+function stripGroupConfig(config: Record<string, unknown>, _groupType: string): Record<string, unknown> {
+  // For student-facing config, only return display-relevant data (no answer keys)
+  const safe: Record<string, unknown> = { ...config };
+  return safe;
+}
+
 /**
  * Whitelist-serializes a populated exam for the candidate, guaranteeing that
- * `acceptedAnswers` and `explanation` can never leak. `.toObject()` is still
- * called and the secret fields are explicitly deleted before mapping.
+ * `acceptedAnswers` and `explanation` can never leak. Supports both
+ * questionGroups (new) and questionIds (legacy) formats.
  */
 export function buildCandidateExam(exam: IExam): CandidateExam {
   const examObj = exam.toObject() as unknown as RawExamObject;
@@ -283,6 +342,47 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
         .filter((m): m is CandidateMediaItem => m !== null);
       const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId);
 
+      const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
+
+      if (hasGroups) {
+        // New path: embedded question groups
+        const candidateGroups: CandidateQuestionGroup[] = (section.questionGroups ?? []).map((group) => ({
+          id: group._id?.toString() ?? "",
+          groupType: group.groupType,
+          instructions: group.instructions ?? "",
+          config: stripGroupConfig(group.config ?? {}, group.groupType),
+          questions: (group.questions ?? []).map((q) => {
+            const qMedia = (q.mediaIds ?? [])
+              .map(toCandidateMediaItem)
+              .filter((m): m is CandidateMediaItem => m !== null);
+            const qMediaIds = (q.mediaIds ?? []).map(extractMediaId);
+            return {
+              id: q._id?.toString() ?? "",
+              questionNumber: q.questionNumber,
+              prompt: q.prompt ?? "",
+              points: q.points ?? 1,
+              mediaIds: qMediaIds,
+              media: qMedia,
+            };
+          }),
+        }));
+
+        return {
+          id: section._id?.toString() ?? "",
+          skill: section.skill,
+          part: section.part,
+          title: section.title,
+          instructions: section.instructions ?? null,
+          passageText: section.passageText ?? null,
+          transcript: section.transcript ?? null,
+          mediaIds: sectionMediaIds,
+          media: sectionMedia,
+          questionGroups: candidateGroups,
+          questions: [],
+        };
+      }
+
+      // Legacy path: populated questionIds
       const questions = (section.questionIds ?? [])
         .filter(isPopulatedQuestion)
         .map((question) => {
@@ -296,6 +396,7 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
 
           return {
             id: question._id.toString(),
+            skill: question.skill ?? section.skill,
             prompt: question.prompt,
             type: question.type,
             part: question.part,
@@ -308,13 +409,16 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
         });
 
       return {
+        id: section._id?.toString() ?? "",
         skill: section.skill,
         part: section.part,
         title: section.title,
         instructions: section.instructions ?? null,
         passageText: section.passageText ?? null,
+        transcript: section.transcript ?? null,
         mediaIds: sectionMediaIds,
         media: sectionMedia,
+        questionGroups: [],
         questions,
       };
     }),
@@ -322,29 +426,60 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
 }
 
 export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestionBuckets {
-  const listening: RawPopulatedQuestion[] = [];
-  const reading: RawPopulatedQuestion[] = [];
+  const listening: GradableQuestion[] = [];
+  const reading: GradableQuestion[] = [];
+  const listeningGrouped: GradableGroupQuestion[] = [];
+  const readingGrouped: GradableGroupQuestion[] = [];
   let hasListening = false;
   let hasReading = false;
   let hasWriting = false;
+  let usesGroups = false;
 
   for (const section of examObj.sections ?? []) {
     if (section.skill === "listening") hasListening = true;
     else if (section.skill === "reading") hasReading = true;
     else if (section.skill === "writing") hasWriting = true;
 
-    for (const item of section.questionIds ?? []) {
-      if (!isPopulatedQuestion(item)) continue;
+    const hasGroupData = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
 
-      const skill = item.skill ?? section.skill;
+    if (hasGroupData) {
+      usesGroups = true;
+      for (const group of section.questionGroups!) {
+        for (const q of group.questions) {
+          const gradable: GradableGroupQuestion = {
+            _id: q._id,
+            questionNumber: q.questionNumber,
+            acceptedAnswers: q.acceptedAnswers ?? [],
+            points: q.points ?? 1,
+            groupConfig: group.config ?? {},
+            groupType: group.groupType,
+          };
+          if (section.skill === "listening") listeningGrouped.push(gradable);
+          else if (section.skill === "reading") readingGrouped.push(gradable);
+        }
+      }
+    } else {
+      for (const item of section.questionIds ?? []) {
+        if (!isPopulatedQuestion(item)) continue;
 
-      if (skill === "listening") listening.push(item);
-      else if (skill === "reading") reading.push(item);
-      else if (skill === "writing") hasWriting = true;
+        const skill = item.skill ?? section.skill;
+
+        if (skill === "listening") listening.push(item);
+        else if (skill === "reading") reading.push(item);
+        else if (skill === "writing") hasWriting = true;
+      }
     }
   }
 
-  return { listening, reading, hasListening, hasReading, hasWriting };
+  return { listening, reading, hasListening, hasReading, hasWriting, listeningGrouped, readingGrouped, usesGroups };
+}
+
+/** Check word count for completion-type answers */
+function checkWordLimit(answer: string, config: Record<string, unknown>): boolean {
+  const maxWords = config.maxWords as number | undefined;
+  if (!maxWords) return true;
+  const wordCount = answer.trim().split(/\s+/).filter(Boolean).length;
+  return wordCount <= maxWords;
 }
 
 export function gradeQuestions(
@@ -362,6 +497,33 @@ export function gradeQuestions(
 
     if (matchAnswer(answer.value, question.acceptedAnswers ?? [])) {
       rawScore += question.points ?? 1;
+    }
+  }
+
+  return rawScore;
+}
+
+/** Grade questions from embedded question groups (with word-limit enforcement) */
+export function gradeGroupedQuestions(
+  answers: Pick<IAttemptAnswer, "questionId" | "value">[],
+  questions: GradableGroupQuestion[]
+): number {
+  let rawScore = 0;
+
+  for (const question of questions) {
+    const answer = answers.find(
+      (candidate) => candidate.questionId.toString() === question._id.toString()
+    );
+
+    if (!answer) continue;
+
+    // Enforce word limit for completion types
+    if (!checkWordLimit(answer.value, question.groupConfig)) {
+      continue; // Over word limit = 0 marks
+    }
+
+    if (matchAnswer(answer.value, question.acceptedAnswers)) {
+      rawScore += question.points;
     }
   }
 
@@ -582,8 +744,12 @@ export async function finalizeAttempt(
 ): Promise<SubmitAttemptResult> {
   const populatedExam = await loadPopulatedExam(attempt.examId);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
-  const { listening, reading, hasListening, hasReading, hasWriting } =
-    collectExamQuestionBuckets(examObj);
+  const {
+    listening, reading,
+    listeningGrouped, readingGrouped,
+    hasListening, hasReading, hasWriting,
+    usesGroups,
+  } = collectExamQuestionBuckets(examObj);
 
   const scores: IAttemptScores = {
     listeningRaw: attempt.scores.listeningRaw,
@@ -597,13 +763,17 @@ export async function finalizeAttempt(
   };
 
   if (hasListening) {
-    const rawScore = gradeQuestions(attempt.answers, listening);
+    const rawScore = usesGroups
+      ? gradeGroupedQuestions(attempt.answers, listeningGrouped)
+      : gradeQuestions(attempt.answers, listening);
     scores.listeningRaw = rawScore;
     scores.listeningBand = calculateBandScore(rawScore, "listening");
   }
 
   if (hasReading) {
-    const rawScore = gradeQuestions(attempt.answers, reading);
+    const rawScore = usesGroups
+      ? gradeGroupedQuestions(attempt.answers, readingGrouped)
+      : gradeQuestions(attempt.answers, reading);
     scores.readingRaw = rawScore;
     scores.readingBand = calculateBandScore(rawScore, "reading");
   }
@@ -817,24 +987,56 @@ export async function getAttemptResult(
   const details: ResultQuestionDetail[] = [];
 
   for (const section of examObj.sections ?? []) {
-    for (const item of section.questionIds ?? []) {
-      if (!isPopulatedQuestion(item)) continue;
+    const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
 
-      const question = item as RawPopulatedQuestion;
-      const answer = attempt.answers.find(
-        (candidate) => candidate.questionId.toString() === question._id.toString()
-      );
-      const studentAnswer = answer ? answer.value : null;
-      const acceptedAnswers = question.acceptedAnswers ?? [];
+    if (hasGroups) {
+      // New path: question groups
+      for (const group of section.questionGroups!) {
+        for (const q of group.questions) {
+          const answer = attempt.answers.find(
+            (candidate) => candidate.questionId.toString() === q._id.toString()
+          );
+          const studentAnswer = answer ? answer.value : null;
+          const acceptedAnswers = q.acceptedAnswers ?? [];
 
-      details.push({
-        questionId: question._id.toString(),
-        studentAnswer,
-        acceptedAnswers,
-        isCorrect:
-          studentAnswer !== null && matchAnswer(studentAnswer, acceptedAnswers),
-        explanation: question.explanation ?? null,
-      });
+          let isCorrect = false;
+          if (studentAnswer !== null) {
+            const withinWordLimit = checkWordLimit(studentAnswer, group.config ?? {});
+            isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+          }
+
+          details.push({
+            questionId: q._id.toString(),
+            questionNumber: q.questionNumber,
+            groupType: group.groupType,
+            studentAnswer,
+            acceptedAnswers,
+            isCorrect,
+            explanation: q.explanation ?? null,
+          });
+        }
+      }
+    } else {
+      // Legacy path: populated questionIds
+      for (const item of section.questionIds ?? []) {
+        if (!isPopulatedQuestion(item)) continue;
+
+        const question = item as RawPopulatedQuestion;
+        const answer = attempt.answers.find(
+          (candidate) => candidate.questionId.toString() === question._id.toString()
+        );
+        const studentAnswer = answer ? answer.value : null;
+        const acceptedAnswers = question.acceptedAnswers ?? [];
+
+        details.push({
+          questionId: question._id.toString(),
+          studentAnswer,
+          acceptedAnswers,
+          isCorrect:
+            studentAnswer !== null && matchAnswer(studentAnswer, acceptedAnswers),
+          explanation: question.explanation ?? null,
+        });
+      }
     }
   }
 
@@ -842,6 +1044,7 @@ export async function getAttemptResult(
 
   return {
     attemptId: attempt._id.toString(),
+    examId: examIdRef.toString(),
     status: attempt.status,
     scores: showScore ? serializeScores(attempt.scores) : {},
     writingReview: review
@@ -971,4 +1174,3 @@ export async function getMyAttempts(
     },
   };
 }
-

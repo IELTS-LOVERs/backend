@@ -2,21 +2,54 @@ import mongoose, { type Types } from "mongoose";
 
 const { Schema, model } = mongoose;
 
-export type SkillType = "listening" | "reading" | "writing";
+export type SkillType = "listening" | "reading" | "writing" | "speaking";
+
+// New: Used for question groups embedded in exams
+export type QuestionGroupType =
+  | "multiple_choice_single"
+  | "multiple_choice_multiple"
+  | "true_false_not_given"
+  | "yes_no_not_given"
+  | "matching_headings"
+  | "matching_information"
+  | "matching_features"
+  | "matching_sentence_endings"
+  | "sentence_completion"
+  | "note_completion"
+  | "table_completion"
+  | "summary_completion"
+  | "summary_completion_options"
+  | "form_completion"
+  | "flow_chart_completion"
+  | "map_labelling"
+  | "diagram_labelling"
+  | "short_answer"
+  | "writing_task_1"
+  | "writing_task_2"
+  | "speaking_part_1"
+  | "speaking_part_2"
+  | "speaking_part_3";
 
 export type QuestionType =
-  | "multiple_choice"
+  | "multiple_choice"          // legacy, maps to multiple_choice_single
+  | "multiple_choice_single"   // NEW
+  | "multiple_choice_multiple" // NEW
   | "form_completion"
   | "note_completion"
   | "table_completion"
   | "sentence_completion"
-  | "matching"
+  | "matching"                 // legacy, generic matching
+  | "matching_headings"
+  | "matching_information"     // NEW
+  | "matching_features"        // NEW
+  | "matching_sentence_endings" // NEW
   | "map_labelling"
   | "diagram_labelling"
-  | "matching_headings"
   | "summary_completion"
   | "true_false_not_given"
   | "yes_no_not_given"
+  | "short_answer"             // NEW
+  | "flow_chart_completion"    // NEW
   | "writing_task_1"
   | "writing_task_2";
 
@@ -39,7 +72,7 @@ export interface IQuestion extends mongoose.Document {
 
 const QuestionSchema = new Schema<IQuestion>(
   {
-    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
+    skill: { type: String, enum: ["listening", "reading", "writing", "speaking"], required: true },
     type: { type: String, required: true },
     part: { type: Number, required: true },
     prompt: { type: String, required: true },

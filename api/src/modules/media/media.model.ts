@@ -23,7 +23,7 @@ export interface IMedia extends mongoose.Document {
 const MediaSchema = new Schema<IMedia>(
   {
     bucket: { type: String, required: true },
-    key: { type: String, required: true, unique: true },
+    key: { type: String, required: true },
     originalName: { type: String, required: true },
     mimeType: { type: String, required: true },
     size: { type: Number, required: true },

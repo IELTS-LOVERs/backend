@@ -7,6 +7,7 @@ import {
   NotFoundError,
 } from "../../common/errors/AppError.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
+import { AttemptModel } from "../attempts/attempt.model.js";
 import { UserModel } from "../users/user.model.js";
 import { ClassModel, type IClass } from "./class.model.js";
 import type { CreateClassBody, UpdateClassBody } from "./class.validation.js";
@@ -29,6 +30,13 @@ export interface StudentSummary {
   email: string;
   fullName: string;
   targetBand: number | null;
+}
+
+// REQ-003: thông tin bổ sung cho học sinh khi liệt kê lớp của mình.
+export interface StudentClassSummary extends ClassSummary {
+  teacher: { id: string; fullName: string } | null;
+  assignmentsTotal: number;
+  assignmentsSubmitted: number;
 }
 
 export interface ClassDetail extends ClassSummary {
@@ -105,12 +113,79 @@ export async function createClass(
   return { ...serializeSummary(cls), teacherId: cls.teacherId.toString() };
 }
 
-export async function getClassesByUser(userId: string, role: string): Promise<ClassSummary[]> {
+export async function getClassesByUser(
+  userId: string,
+  role: string
+): Promise<ClassSummary[] | StudentClassSummary[]> {
   const filter =
     role === "admin" ? {} : role === "teacher" ? { teacherId: userId } : { students: userId };
 
   const classes = await ClassModel.find(filter).sort({ createdAt: -1 });
-  return classes.map(serializeSummary);
+
+  if (role !== "student") {
+    return classes.map(serializeSummary);
+  }
+
+  return enrichStudentClasses(classes, userId);
+}
+
+// REQ-003: học sinh cần thấy giáo viên phụ trách và tiến độ bài tập của từng lớp.
+async function enrichStudentClasses(
+  classes: IClass[],
+  studentId: string
+): Promise<StudentClassSummary[]> {
+  const classIds = classes.map((cls) => cls._id);
+  const teacherIds = classes.map((cls) => cls.teacherId);
+
+  const teachers = await UserModel.find({ _id: { $in: teacherIds } }).select("fullName");
+  const teacherNameById = new Map(teachers.map((t) => [t._id.toString(), t.fullName]));
+
+  const assignments = await AssignmentModel.find({
+    classId: { $in: classIds },
+    status: "active",
+  }).select("_id classId");
+
+  const totalByClass = new Map<string, number>();
+  const classByAssignment = new Map<string, string>();
+  for (const assignment of assignments) {
+    const classId = assignment.classId?.toString();
+    if (!classId) continue;
+    totalByClass.set(classId, (totalByClass.get(classId) ?? 0) + 1);
+    classByAssignment.set(assignment._id.toString(), classId);
+  }
+
+  const submittedByClass = new Map<string, Set<string>>();
+  if (assignments.length > 0) {
+    const attempts = await AttemptModel.find({
+      studentId,
+      assignmentId: { $in: assignments.map((assignment) => assignment._id) },
+      status: { $in: ["submitted", "expired"] },
+    }).select("assignmentId");
+
+    for (const attempt of attempts) {
+      const assignmentId = attempt.assignmentId?.toString();
+      if (!assignmentId) continue;
+      const classId = classByAssignment.get(assignmentId);
+      if (!classId) continue;
+      const set = submittedByClass.get(classId) ?? new Set<string>();
+      set.add(assignmentId);
+      submittedByClass.set(classId, set);
+    }
+  }
+
+  return classes.map((cls) => {
+    const id = cls._id.toString();
+    const teacherName = teacherNameById.get(cls.teacherId.toString());
+
+    return {
+      ...serializeSummary(cls),
+      teacher: teacherName
+        ? { id: cls.teacherId.toString(), fullName: teacherName }
+        : null,
+      assignmentsTotal: totalByClass.get(id) ?? 0,
+      assignmentsSubmitted: submittedByClass.get(id)?.size ?? 0,
+    };
+  });
 }
 
 export async function getClassDetail(
@@ -301,4 +376,25 @@ export async function removeStudent(
   await cls.save();
 
   return { message: "Đã xóa học sinh khỏi lớp học" };
+}
+
+// REQ-002: học sinh tự rời lớp.
+export async function leaveClass(
+  classId: string,
+  studentId: string
+): Promise<{ message: string }> {
+  const cls = await ClassModel.findById(classId);
+
+  if (!cls) {
+    throw new NotFoundError("Lớp học không tồn tại.");
+  }
+
+  if (!isMember(cls, studentId)) {
+    throw new BadRequestError("STUDENT_NOT_IN_CLASS", "Bạn không thuộc lớp học này.");
+  }
+
+  cls.students = cls.students.filter((id) => id.toString() !== studentId);
+  await cls.save();
+
+  return { message: "Đã rời lớp học thành công" };
 }

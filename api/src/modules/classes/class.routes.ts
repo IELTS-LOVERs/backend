@@ -27,6 +27,13 @@ router.post(
   validate(JoinClassSchema),
   classController.joinClass
 );
+// REQ-002: học sinh tự rời lớp.
+router.post(
+  "/:id/leave",
+  authenticate,
+  requireRoles("student"),
+  classController.leaveClass
+);
 router.get("/:id", authenticate, classController.getClassDetail);
 router.patch(
   "/:id",

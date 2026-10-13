@@ -9,7 +9,7 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
-  if (err?.name === "CastError") {
+  if (err?.name === "CastError" || err?.name === "BSONError") {
     sendError(res, new BadRequestError("VALIDATION_ERROR", "Định dạng ID không hợp lệ."));
     return;
   }

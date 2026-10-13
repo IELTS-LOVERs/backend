@@ -66,3 +66,11 @@ export async function removeStudent(req: Request, res: Response): Promise<void> 
   const result = await classService.removeStudent(classId, user.id, user.role, studentId);
   sendSuccess(res, result);
 }
+
+// REQ-002: POST /classes/:id/leave — học sinh tự rời lớp.
+export async function leaveClass(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const classId = req.params.id as string;
+  const result = await classService.leaveClass(classId, user.id);
+  sendSuccess(res, result);
+}
