@@ -1,7 +1,16 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { logger } from "../../common/utils/logger.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
-import { buildCandidateExam, toCandidateMediaItem, type CandidateExam, type CandidateMediaItem } from "../attempts/attempt.service.js";
+import {
+  buildCandidateExam,
+  examMediaPresignTtl,
+  presignMediaMap,
+  shouldEnforceWordLimit,
+  toCandidateMediaItem,
+  type CandidateExam,
+  type CandidateMediaItem,
+} from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
@@ -375,13 +384,18 @@ export async function getById(
     throw new NotFoundError("Đề thi không tồn tại.");
   }
 
+  const mediaUrlMap = await presignMediaMap(
+    exam,
+    examMediaPresignTtl(exam.durationMinutes)
+  );
+
   if (role === "student") {
     if (exam.status === "draft") {
       throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
     }
 
     return {
-      ...buildCandidateExam(exam),
+      ...buildCandidateExam(exam, mediaUrlMap),
       durationMinutes: exam.durationMinutes,
       status: exam.status,
     };
@@ -395,7 +409,7 @@ export async function getById(
     const usesGroups = sectionUsesGroups(section);
     const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId).filter(Boolean);
     const sectionMedia = (section.mediaIds ?? [])
-      .map(toCandidateMediaItem)
+      .map((item) => toCandidateMediaItem(item, mediaUrlMap))
       .filter((media): media is CandidateMediaItem => media !== null);
 
     if (usesGroups) {
@@ -603,7 +617,64 @@ export async function publish(
             }
           }
         }
+
+        // FIX-11: warn when maxWords is set on a group type that ignores it.
+        const configuredMaxWords = (group.config as { maxWords?: unknown } | undefined)
+          ?.maxWords;
+        if (
+          typeof configuredMaxWords === "number" &&
+          !shouldEnforceWordLimit(group.groupType)
+        ) {
+          logger.warn("exam.publish_word_limit_ignored", {
+            examId: exam._id.toString(),
+            groupType: group.groupType,
+            maxWords: configuredMaxWords,
+          });
+        }
       }
+    }
+  }
+
+  // FIX-08/M-03: listening/reading must total 40 points (writing is band-scored).
+  await exam.populate("sections.questionIds");
+
+  for (const section of exam.sections) {
+    if (section.skill === "writing") continue;
+
+    let sectionPoints = 0;
+
+    if (sectionUsesGroups(section)) {
+      for (const group of section.questionGroups) {
+        for (const q of group.questions) {
+          sectionPoints += q.points ?? 1;
+        }
+      }
+    } else {
+      const rawQuestions = section.questionIds as unknown as
+        | (PopulatedQuestion | null)[]
+        | undefined;
+      sectionPoints = (rawQuestions ?? [])
+        .filter(
+          (q): q is PopulatedQuestion =>
+            q !== null && typeof q === "object" && "_id" in q
+        )
+        .reduce((sum, q) => sum + (q.points ?? 1), 0);
+    }
+
+    if (sectionPoints > 40) {
+      throw new BadRequestError(
+        "EXAM_POINTS_EXCEEDS_40",
+        `Phần ${section.title || section.part} có tổng điểm ${sectionPoints}, vượt quá 40 điểm của một kỹ năng IELTS.`
+      );
+    }
+
+    if (sectionPoints > 0 && sectionPoints !== 40) {
+      logger.warn("exam.publish_points_mismatch", {
+        examId: exam._id.toString(),
+        skill: section.skill,
+        part: section.part,
+        sectionPoints,
+      });
     }
   }
 

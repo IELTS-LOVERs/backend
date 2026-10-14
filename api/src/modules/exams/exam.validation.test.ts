@@ -50,6 +50,62 @@ describe("CreateExamSchema", () => {
       }).success
     ).toBe(false);
   });
+
+  it("strips unknown keys from question group config (FIX-18)", () => {
+    const result = CreateExamSchema.safeParse({
+      body: {
+        ...validBody,
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            title: "Passage 1",
+            questionGroups: [
+              {
+                groupType: "summary_completion",
+                config: { options: [{ id: "A", text: "alpha" }], foo: "bar" },
+                questions: [],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const config = result.data.body.sections[0]?.questionGroups[0]?.config as Record<
+        string,
+        unknown
+      >;
+      expect(config.options).toBeDefined();
+      expect(config.foo).toBeUndefined();
+    }
+  });
+
+  it("rejects fractional question points (FIX-08)", () => {
+    const result = CreateExamSchema.safeParse({
+      body: {
+        ...validBody,
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            title: "Passage 1",
+            questionGroups: [
+              {
+                groupType: "summary_completion",
+                config: {},
+                questions: [{ questionNumber: 1, prompt: "Q", points: 1.5 }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("UpdateExamSchema", () => {

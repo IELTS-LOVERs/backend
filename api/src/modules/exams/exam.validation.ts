@@ -67,7 +67,6 @@ export const QuestionGroupConfigSchema = z
     speakTimeSeconds: z.number().int().optional(),
     questions: z.array(z.string()).optional(),
   })
-  .passthrough()
   .default({});
 
 const QuestionItemInputSchema = z.object({
@@ -75,7 +74,7 @@ const QuestionItemInputSchema = z.object({
   questionNumber: z.number().int().min(1),
   prompt: z.string().default(""),
   acceptedAnswers: z.array(z.string()).default([]),
-  points: z.number().default(1),
+  points: z.number().int("Điểm phải là số nguyên").min(1).max(10).default(1),
   explanation: z.string().optional().nullable(),
   mediaIds: z.array(z.string()).optional(),
 });

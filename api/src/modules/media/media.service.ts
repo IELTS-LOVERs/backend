@@ -6,7 +6,7 @@ import {
   NotFoundError,
 } from "../../common/errors/AppError.js";
 import { env } from "../../config/env.js";
-import { minioClient } from "../../config/minio.js";
+import { minioClient, minioPresignClient, presignGetObject } from "../../config/minio.js";
 import { logger } from "../../common/utils/logger.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel } from "../questions/question.model.js";
@@ -14,6 +14,9 @@ import { MediaModel, type MediaType } from "./media.model.js";
 import type { ListMediaQuery, PresignUploadBody } from "./media.validation.js";
 
 export const PRESIGN_EXPIRES_IN_SECONDS = 15 * 60;
+
+/** TTL for media-library preview URLs (teacher media page, avatars). */
+const MEDIA_GET_URL_EXPIRES_IN_SECONDS = 15 * 60;
 
 export interface PresignedUploadResult {
   mediaId: string;
@@ -83,7 +86,9 @@ export async function createPresignedUpload(
     uploadedBy: new mongoose.Types.ObjectId(userId),
   });
 
-  const uploadUrl = await minioClient.presignedPutObject(
+  // I-2: the upload URL is used by the BROWSER, so it must be signed against
+  // the client-reachable endpoint (minioPresignClient), not the internal one.
+  const uploadUrl = await minioPresignClient.presignedPutObject(
     env.MINIO_BUCKET,
     key,
     PRESIGN_EXPIRES_IN_SECONDS
@@ -160,21 +165,31 @@ export async function listMedia(
     MediaModel.countDocuments(query),
   ]);
 
+  const serializedItems: MediaListItem[] = await Promise.all(
+    items.map(async (item) => {
+      const presigned = await presignGetObject(
+        item.key,
+        MEDIA_GET_URL_EXPIRES_IN_SECONDS
+      );
+      return {
+        id: item._id.toString(),
+        bucket: item.bucket,
+        key: item.key,
+        originalName: item.originalName,
+        mimeType: item.mimeType,
+        size: item.size,
+        type: item.type,
+        status: item.status,
+        url: presigned ?? `${env.PUBLIC_MEDIA_URL}/${item.key}`,
+        uploadedBy: item.uploadedBy.toString(),
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      };
+    })
+  );
+
   return {
-    items: items.map((item) => ({
-      id: item._id.toString(),
-      bucket: item.bucket,
-      key: item.key,
-      originalName: item.originalName,
-      mimeType: item.mimeType,
-      size: item.size,
-      type: item.type,
-      status: item.status,
-      url: `${env.PUBLIC_MEDIA_URL}/${item.key}`,
-      uploadedBy: item.uploadedBy.toString(),
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    })),
+    items: serializedItems,
     total,
     page,
     limit,

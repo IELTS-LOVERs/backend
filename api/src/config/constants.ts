@@ -125,6 +125,11 @@ export function calculateBandScore(
   skill: "listening" | "reading",
   trainingType: "academic" | "general" = "academic"
 ): number {
+  // FIX-08: defensive guard for non-finite/negative/legacy fractional scores.
+  if (!Number.isFinite(rawScore) || rawScore < 0) rawScore = 0;
+  // Band lookup uses the lower whole-number mark (e.g. 6.5 falls on 6).
+  rawScore = Math.floor(rawScore);
+
   if (rawScore <= 3) return 2.0;
   if (rawScore > 40) rawScore = 40;
 

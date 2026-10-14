@@ -129,6 +129,42 @@ describe("admin user management", () => {
     expect(result.totalPages).toBe(1);
   });
 
+  it("escapes regex metacharacters in the search term (FIX-21)", async () => {
+    let capturedQuery: Record<string, unknown> | undefined;
+    const mockFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return mockFind as never;
+    });
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await expect(listUsers({ search: "[", page: 1, limit: 20 })).resolves.toBeDefined();
+
+    const or = capturedQuery?.$or as Array<{ email: RegExp }>;
+    expect(or[0].email).toBeInstanceOf(RegExp);
+    expect(or[0].email.source).toBe("\\[");
+  });
+
+  it("does not throw on catastrophic-looking patterns (FIX-21)", async () => {
+    const mockFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce(() => mockFind as never);
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await expect(
+      listUsers({ search: "(a+)+$", page: 1, limit: 20 })
+    ).resolves.toBeDefined();
+  });
+
   it("rejects a duplicate email when creating a user", async () => {
     vi.spyOn(UserModel, "findOne").mockResolvedValueOnce({ _id: "existing" } as never);
 
@@ -160,12 +196,15 @@ describe("admin user management", () => {
     expect(user.role).toBe("teacher");
   });
 
-  it("bumps tokenVersion when suspending a user", async () => {
+  it("bumps tokenVersion and clears refresh sessions when suspending a user", async () => {
     const userId = new mongoose.Types.ObjectId();
     const doc = {
       _id: userId,
       status: "active",
       tokenVersion: 2,
+      refreshSessions: [
+        { tokenHash: "abc", createdAt: new Date(), expiresAt: new Date(Date.now() + 1000) },
+      ],
       save: vi.fn().mockResolvedValue(undefined),
     };
     vi.spyOn(UserModel, "findById").mockResolvedValueOnce(doc as never);
@@ -174,6 +213,7 @@ describe("admin user management", () => {
 
     expect(doc.status).toBe("suspended");
     expect(doc.tokenVersion).toBe(3);
+    expect(doc.refreshSessions).toEqual([]);
   });
 
   it("throws NotFoundError when updating a missing user", async () => {

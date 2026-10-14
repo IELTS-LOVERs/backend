@@ -24,6 +24,12 @@ import { analyticsRoutes } from "./modules/analytics/analytics.routes.js";
 
 const app = express();
 
+// I-3: behind Cloudflare Tunnel / reverse proxies, the client IP arrives in
+// X-Forwarded-For. The number of trusted hops is configurable (set
+// TRUST_PROXY_HOPS=0 when the API is reachable directly) so `req.ip` stays
+// accurate in logs — and would stay accurate if rate limiting is re-enabled.
+app.set("trust proxy", env.TRUST_PROXY_HOPS);
+
 app.use(helmet());
 app.use(
   cors({
@@ -38,6 +44,15 @@ app.use(cookieParser());
 app.get("/api/health", (_req, res) => {
   sendSuccess(res, { status: "ok", timestamp: new Date() });
 });
+
+// ⚠️ RATE LIMITING ĐÃ ĐƯỢC GỠ theo yêu cầu chủ dự án (2026-10-14):
+// không còn giới hạn tần suất cho /api/auth/login, /api/auth/register,
+// /api/auth/refresh và toàn bộ /api. Hệ quả: không còn lớp chống brute-force
+// mật khẩu và DoS nhẹ ở tầng ứng dụng.
+// Middleware `common/middlewares/rateLimiter.ts` (+ test) vẫn được giữ nguyên;
+// để bật lại, chỉ cần import và mount như cũ:
+//   app.use("/api/auth/login", createRateLimiter(10, 60_000, { skipSuccessfulRequests: true }));
+//   app.use("/api", createRateLimiter(1200, 60_000));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);

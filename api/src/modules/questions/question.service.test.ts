@@ -90,6 +90,39 @@ describe("list questions with search", () => {
     expect(queryObj.$or?.[1].content?.source).toBe("environment");
     expect(queryObj.$or?.[1].content?.flags).toContain("i");
   });
+
+  it("escapes regex metacharacters so invalid patterns cannot throw (logic fix)", async () => {
+    const runList = async (search: string) => {
+      let capturedQuery: unknown;
+      const mockFind = {
+        sort: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockResolvedValue([]),
+      };
+      vi.spyOn(QuestionModel, "find").mockImplementationOnce((query) => {
+        capturedQuery = query;
+        return mockFind as never;
+      });
+      vi.spyOn(QuestionModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+      const result = await list({ page: 1, limit: 20, search });
+      return { result, capturedQuery };
+    };
+
+    // Before the fix this threw SyntaxError (invalid regex) → HTTP 500.
+    const invalid = await runList("[");
+    expect(invalid.result).toBeDefined();
+    expect((invalid.capturedQuery as { $or?: Array<{ prompt?: RegExp }> }).$or?.[0].prompt?.source).toBe(
+      "\\["
+    );
+
+    // Catastrophic-backtracking input must be treated as a literal too.
+    const redos = await runList("(a+)+$");
+    expect(redos.result).toBeDefined();
+    expect((redos.capturedQuery as { $or?: Array<{ prompt?: RegExp }> }).$or?.[0].prompt?.source).toBe(
+      "\\(a\\+\\)\\+\\$"
+    );
+  });
 });
 
 describe("remove question referential integrity", () => {

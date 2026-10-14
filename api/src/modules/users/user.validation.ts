@@ -22,7 +22,7 @@ export const ListUsersSchema = z.object({
   query: z.object({
     role: z.enum(["student", "teacher", "admin"]).optional(),
     status: z.enum(["active", "inactive", "suspended"]).optional(),
-    search: z.string().optional(),
+    search: z.string().max(100).optional(),
     page: z.coerce.number().int().positive().default(1),
     limit: z.coerce.number().int().positive().max(100).default(20),
   }),

@@ -15,9 +15,11 @@ import {
   computeRemainingSeconds,
   getAttemptForRecovery,
   getAttemptResult,
+  gradeGroupedQuestions,
   gradeQuestions,
   shuffleQuestionIds,
   startAttempt,
+  stripGroupConfig,
   submitAttempt,
   type CandidateExam,
   type RawExamObject,
@@ -477,6 +479,96 @@ describe("auto-finalize when expired", () => {
   });
 });
 
+describe("mixed legacy + questionGroups grading (logic fix)", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+  const attemptId = new mongoose.Types.ObjectId().toString();
+
+  it("grades BOTH buckets: legacy sections are not zeroed when another section uses groups", async () => {
+    const legacyQuestion = makeQuestion({
+      skill: "listening",
+      acceptedAnswers: ["secret-answer"],
+      points: 1,
+    });
+    const groupQuestionId = new mongoose.Types.ObjectId();
+
+    // Mixed exam: listening section in legacy `questionIds` format + reading
+    // section in the new embedded `questionGroups` format.
+    const examObj = {
+      _id: examId,
+      title: "Mixed format exam",
+      sections: [
+        {
+          skill: "listening",
+          part: 1,
+          title: "Legacy L1",
+          questionIds: [legacyQuestion],
+          questionGroups: [],
+        },
+        {
+          skill: "reading",
+          part: 1,
+          title: "Grouped R1",
+          questionIds: [],
+          questionGroups: [
+            {
+              _id: new mongoose.Types.ObjectId(),
+              groupType: "summary_completion",
+              config: {},
+              questions: [
+                {
+                  _id: groupQuestionId,
+                  questionNumber: 1,
+                  prompt: "Grouped question",
+                  acceptedAnswers: ["group-answer"],
+                  points: 1,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const mockAttempt = {
+      _id: attemptId,
+      studentId,
+      examId,
+      status: "in_progress",
+      expiresAt: new Date(Date.now() + 60_000),
+      answers: [
+        { questionId: legacyQuestion._id, value: "secret-answer" },
+        { questionId: groupQuestionId, value: "group-answer" },
+      ],
+      scores: {},
+      save: vi.fn(),
+    };
+
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        populate: vi.fn().mockResolvedValue({ toObject: () => examObj }),
+      }),
+    } as never);
+    const updateSpy = vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
+      _id: attemptId,
+      status: "submitted",
+      submittedAt: new Date(),
+      scores: {},
+    } as never);
+
+    const result = await submitAttempt(attemptId, studentId);
+
+    expect(result.status).toBe("submitted");
+    const updateArg = updateSpy.mock.calls[0][1] as {
+      $set: { scores: { listeningRaw?: number; readingRaw?: number } };
+    };
+    // Both correct answers must count: 1 legacy listening + 1 grouped reading.
+    expect(updateArg.$set.scores.listeningRaw).toBe(1);
+    expect(updateArg.$set.scores.readingRaw).toBe(1);
+  });
+});
+
 describe("BUG-03 assignment requirement flag", () => {
   const studentId = new mongoose.Types.ObjectId().toString();
   const examId = new mongoose.Types.ObjectId().toString();
@@ -599,6 +691,91 @@ describe("BUG-05 expired attempt result", () => {
   });
 });
 
+describe("startAttempt assignment preference (FIX-12)", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+  const assignmentId = new mongoose.Types.ObjectId().toString();
+
+  function mockExamLookups() {
+    vi.spyOn(ExamModel, "findById")
+      .mockResolvedValueOnce({
+        _id: examId,
+        status: "published",
+        durationMinutes: 60,
+      } as never)
+      .mockReturnValueOnce({
+        populate: vi.fn().mockReturnValue({
+          populate: vi.fn().mockResolvedValue({
+            toObject: () => ({ _id: examId, title: "T", durationMinutes: 60, sections: [] }),
+          }),
+        }),
+      } as never);
+  }
+
+  function mockAssignment() {
+    vi.spyOn(AssignmentModel, "findById").mockResolvedValueOnce({
+      _id: assignmentId,
+      status: "active",
+      examId,
+      maxAttempts: 2,
+    } as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(0 as never);
+  }
+
+  it("returns the attempt already bound to the assignment", async () => {
+    mockExamLookups();
+    mockAssignment();
+
+    const boundAttempt = {
+      _id: new mongoose.Types.ObjectId(),
+      examId,
+      assignmentId,
+      startedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+      status: "in_progress",
+      questionOrder: [],
+    };
+    const findOneSpy = vi
+      .spyOn(AttemptModel, "findOne")
+      .mockResolvedValueOnce(boundAttempt as never);
+
+    const result = await startAttempt(studentId, examId, assignmentId);
+
+    expect(result.attemptId).toBe(boundAttempt._id.toString());
+    expect(findOneSpy.mock.calls[0][0]).toMatchObject({
+      studentId,
+      assignmentId,
+      status: "in_progress",
+    });
+  });
+
+  it("attaches the assignment to an existing free attempt", async () => {
+    mockExamLookups();
+    mockAssignment();
+
+    const freeAttempt = {
+      _id: new mongoose.Types.ObjectId(),
+      examId,
+      assignmentId: undefined as unknown as mongoose.Types.ObjectId,
+      startedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+      status: "in_progress",
+      questionOrder: [],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.spyOn(AttemptModel, "findOne")
+      .mockResolvedValueOnce(null) // no attempt bound to the assignment
+      .mockResolvedValueOnce(freeAttempt as never); // free attempt found by examId
+
+    const result = await startAttempt(studentId, examId, assignmentId);
+
+    expect(result.attemptId).toBe(freeAttempt._id.toString());
+    expect(freeAttempt.assignmentId?.toString()).toBe(assignmentId);
+    expect(freeAttempt.save).toHaveBeenCalled();
+  });
+});
+
 describe("question shuffle helpers", () => {
   it("is deterministic for the same seed and preserves all ids", () => {
     const ids = ["a", "b", "c", "d", "e"];
@@ -641,5 +818,164 @@ describe("question shuffle helpers", () => {
       "q2",
     ]);
     expect(applyQuestionOrder(exam, [])).toBe(exam);
+  });
+
+  it("reorders questions inside question groups but keeps group order stable (FIX-09)", () => {
+    const exam: CandidateExam = {
+      id: "exam-groups",
+      title: "Grouped",
+      sections: [
+        {
+          id: "s1",
+          skill: "reading",
+          part: 1,
+          title: "P1",
+          instructions: null,
+          passageText: null,
+          transcript: null,
+          mediaIds: [],
+          media: [],
+          questions: [],
+          questionGroups: [
+            {
+              id: "g1",
+              groupType: "summary_completion",
+              instructions: "",
+              config: {},
+              questions: [
+                { id: "a", questionNumber: 1, prompt: "", points: 1, mediaIds: [], media: [] },
+                { id: "b", questionNumber: 2, prompt: "", points: 1, mediaIds: [], media: [] },
+                { id: "c", questionNumber: 3, prompt: "", points: 1, mediaIds: [], media: [] },
+              ],
+            },
+            {
+              id: "g2",
+              groupType: "summary_completion",
+              instructions: "",
+              config: {},
+              questions: [
+                { id: "d", questionNumber: 4, prompt: "", points: 1, mediaIds: [], media: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const reordered = applyQuestionOrder(exam, ["c", "b", "a", "d"]);
+    const groups = reordered.sections[0].questionGroups;
+
+    // Group order must NOT change (templates bind to questionNumber).
+    expect(groups.map((group) => group.id)).toEqual(["g1", "g2"]);
+    // Within the group, questions follow the shuffled order, numbering intact.
+    expect(groups[0].questions.map((q) => q.id)).toEqual(["c", "b", "a"]);
+    expect(groups[0].questions.map((q) => q.questionNumber)).toEqual([3, 2, 1]);
+  });
+});
+
+describe("buildCandidateExam question-group safety (FIX-18)", () => {
+  it("whitelists config and never leaks acceptedAnswers/explanation", () => {
+    const examStub = {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Grouped",
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            title: "P1",
+            instructions: "Do this",
+            passageText: null,
+            mediaIds: [],
+            questionIds: [],
+            questionGroups: [
+              {
+                _id: new mongoose.Types.ObjectId(),
+                groupType: "summary_completion",
+                instructions: "",
+                config: {
+                  options: [{ id: "A", text: "alpha" }],
+                  foo: "unknown-key",
+                  acceptedAnswers: ["config-leak"],
+                },
+                questions: [
+                  {
+                    _id: new mongoose.Types.ObjectId(),
+                    questionNumber: 1,
+                    prompt: "Q1",
+                    acceptedAnswers: ["secret-answer"],
+                    points: 1,
+                    explanation: "secret-explanation",
+                    mediaIds: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+
+    const candidate = buildCandidateExam(examStub);
+    const serialized = JSON.stringify(candidate);
+
+    expect(serialized).not.toContain("secret-answer");
+    expect(serialized).not.toContain("secret-explanation");
+    expect(serialized).not.toContain("config-leak");
+    expect(serialized).not.toContain("unknown-key");
+
+    const config = candidate.sections[0].questionGroups[0].config;
+    expect(config.options).toBeDefined();
+    expect(config.foo).toBeUndefined();
+    expect(config.acceptedAnswers).toBeUndefined();
+  });
+});
+
+describe("stripGroupConfig whitelist (FIX-18)", () => {
+  it("keeps only whitelisted display keys", () => {
+    const result = stripGroupConfig({
+      options: [{ id: "A", text: "a" }],
+      maxWords: 3,
+      foo: "bar",
+    });
+
+    expect(result.options).toBeDefined();
+    expect(result.maxWords).toBe(3);
+    expect(result.foo).toBeUndefined();
+  });
+});
+
+describe("gradeGroupedQuestions word limit (FIX-11)", () => {
+  const qId = new mongoose.Types.ObjectId();
+  const answers = [{ questionId: qId, value: "one two three" }];
+
+  it("ignores maxWords for non-completion group types", () => {
+    const score = gradeGroupedQuestions(answers, [
+      {
+        _id: qId,
+        questionNumber: 1,
+        acceptedAnswers: ["one two three"],
+        points: 1,
+        groupConfig: { maxWords: 2 },
+        groupType: "multiple_choice_single",
+      },
+    ]);
+
+    expect(score).toBe(1);
+  });
+
+  it("enforces maxWords for completion group types", () => {
+    const score = gradeGroupedQuestions(answers, [
+      {
+        _id: qId,
+        questionNumber: 1,
+        acceptedAnswers: ["one two three"],
+        points: 1,
+        groupConfig: { maxWords: 2 },
+        groupType: "summary_completion",
+      },
+    ]);
+
+    expect(score).toBe(0);
   });
 });

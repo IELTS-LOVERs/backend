@@ -132,8 +132,9 @@ describe("publish and unpublish", () => {
     const mockExam = {
       _id: examId,
       createdBy: teacherId,
-      sections: [{ questionIds: [new mongoose.Types.ObjectId()] }],
+      sections: [{ skill: "listening", questionIds: [new mongoose.Types.ObjectId()] }],
       status: "draft",
+      populate: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
     };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);

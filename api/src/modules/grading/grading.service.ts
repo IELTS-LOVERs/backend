@@ -147,7 +147,8 @@ export function assertTeacherOwnsAttempt(
 
 export async function getPendingWritingSubmissions(
   teacherId: string,
-  role: string
+  role: string,
+  options: { page?: number; limit?: number } = {}
 ): Promise<PendingWritingResult> {
   const attempts = await AttemptModel.find({
     status: { $in: ["submitted", "expired"] },
@@ -198,7 +199,20 @@ export async function getPendingWritingSubmissions(
     });
   }
 
-  return { items, totalPending: items.length };
+  // FIX-22: optional pagination. NOTE: the filtering above still loads all
+  // submitted attempts and filters in memory; a full rewrite to an aggregate
+  // with DB-side paging is deferred (see FIX_RESULT.md).
+  const totalPending = items.length;
+  const paginationRequested =
+    options.page !== undefined || options.limit !== undefined;
+  const paginatedItems = paginationRequested
+    ? items.slice(
+        (Math.max(1, options.page ?? 1) - 1) * Math.max(1, options.limit ?? 20),
+        Math.max(1, options.page ?? 1) * Math.max(1, options.limit ?? 20)
+      )
+    : items;
+
+  return { items: paginatedItems, totalPending };
 }
 
 export async function getAttemptForGrading(

@@ -1,6 +1,7 @@
 import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
+import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import { logger } from "../../common/utils/logger.js";
 import { UserModel, type IUser, type UserStatus } from "./user.model.js";
 import type {
@@ -55,6 +56,8 @@ export async function resetPassword(userId: string, newPassword: string): Promis
 
   user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+  // FIX-04: admin password reset invalidates every refresh session.
+  user.refreshSessions = [];
   await user.save();
 
   logger.info("auth.admin_password_reset", { userId });
@@ -75,7 +78,7 @@ export async function listUsers(filters: ListUsersQuery): Promise<ListUsersResul
   if (filters.status) query.status = filters.status;
 
   if (filters.search && filters.search.trim().length > 0) {
-    const searchRegex = new RegExp(filters.search.trim(), "i");
+    const searchRegex = new RegExp(escapeRegExp(filters.search.trim()), "i");
     query.$or = [{ email: searchRegex }, { fullName: searchRegex }];
   }
 
@@ -138,6 +141,8 @@ export async function updateUserStatus(
 
   if (status === "suspended") {
     user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+    // FIX-04: suspension revokes every refresh session for the account.
+    user.refreshSessions = [];
   }
 
   await user.save();

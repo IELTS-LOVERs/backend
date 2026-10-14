@@ -20,7 +20,8 @@ import {
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
 import "../questions/question.model.js";
-import "../media/media.model.js";
+import { MediaModel } from "../media/media.model.js";
+import { presignGetObject } from "../../config/minio.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
 import {
   AttemptModel,
@@ -232,7 +233,10 @@ function isPopulatedQuestion(value: unknown): value is RawPopulatedQuestion {
   );
 }
 
-export function toCandidateMediaItem(item: unknown): CandidateMediaItem | null {
+export function toCandidateMediaItem(
+  item: unknown,
+  urlMap?: Map<string, string>
+): CandidateMediaItem | null {
   if (
     typeof item === "object" &&
     item !== null &&
@@ -246,14 +250,101 @@ export function toCandidateMediaItem(item: unknown): CandidateMediaItem | null {
       type: "audio" | "image";
       originalName?: string;
     };
+    const id = mediaDoc._id.toString();
+    // FIX-02: prefer a short-lived presigned GET URL. Fall back to the legacy
+    // static public URL only when presigning was unavailable, so the exam UI
+    // still renders instead of breaking outright.
+    const presigned = urlMap?.get(id);
     return {
-      id: mediaDoc._id.toString(),
-      url: `${env.PUBLIC_MEDIA_URL}/${mediaDoc.key}`,
+      id,
+      url: presigned ?? `${env.PUBLIC_MEDIA_URL}/${mediaDoc.key}`,
       type: mediaDoc.type,
       originalName: mediaDoc.originalName ?? "",
     };
   }
   return null;
+}
+
+/** TTL for media that is not tied to a live exam (avatars, media library). */
+export const DEFAULT_MEDIA_PRESIGN_TTL_SECONDS = 15 * 60;
+
+/**
+ * TTL for exam media: enough to cover the whole attempt plus 30 minutes of
+ * slack, so an `<audio>` URL stays valid from start to (grace-period) submit.
+ */
+export function examMediaPresignTtl(durationMinutes: number): number {
+  return durationMinutes * 60 + 1800;
+}
+
+/** Collect every media ObjectId referenced by an exam (all formats). */
+export function collectExamMediaIds(exam: IExam): string[] {
+  const maybeToObject = exam as unknown as { toObject?: () => unknown };
+  const examObj = (
+    typeof maybeToObject.toObject === "function"
+      ? maybeToObject.toObject()
+      : exam
+  ) as RawExamObject & {
+    sections?: Array<RawPopulatedSection & { questionGroups?: IQuestionGroup[] }>;
+  };
+  const ids = new Set<string>();
+
+  for (const section of examObj.sections ?? []) {
+    for (const media of section.mediaIds ?? []) {
+      const id = extractMediaId(media);
+      if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
+    }
+
+    for (const group of section.questionGroups ?? []) {
+      for (const question of group.questions ?? []) {
+        for (const media of question.mediaIds ?? []) {
+          const id = extractMediaId(media);
+          if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
+        }
+      }
+    }
+
+    for (const item of section.questionIds ?? []) {
+      if (!isPopulatedQuestion(item)) continue;
+      for (const media of item.mediaIds ?? []) {
+        const id = extractMediaId(media);
+        if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+/**
+ * Resolve presigned GET URLs for every media in the exam, keyed by media id.
+ * Missing/unpresignable media are simply absent from the map (the caller then
+ * falls back to the legacy static URL).
+ */
+export async function presignMediaMap(
+  exam: IExam,
+  ttlSeconds: number
+): Promise<Map<string, string>> {
+  const ids = collectExamMediaIds(exam);
+  const urlMap = new Map<string, string>();
+
+  if (ids.length === 0) return urlMap;
+
+  const mediaDocs = await MediaModel.find({ _id: { $in: ids } }).select("key");
+
+  await Promise.all(
+    mediaDocs.map(async (doc) => {
+      const key = (doc as unknown as { key?: string }).key;
+      if (!key) return;
+      const url = await presignGetObject(key, ttlSeconds);
+      if (url) {
+        urlMap.set(doc._id.toString(), url);
+      } else {
+        logger.warn("media.presign_failed", { mediaId: doc._id.toString(), key });
+      }
+    })
+  );
+
+  return urlMap;
 }
 
 function extractMediaId(item: unknown): string {
@@ -307,22 +398,68 @@ export function applyQuestionOrder(exam: CandidateExam, order: string[]): Candid
 
   const position = new Map(order.map((id, index) => [id, index]));
 
+  const sortByIdPosition = <T extends { id: string }>(items: T[]): T[] =>
+    [...items].sort((a, b) => {
+      const positionA = position.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+      const positionB = position.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+      return positionA - positionB;
+    });
+
   return {
     ...exam,
     sections: exam.sections.map((section) => ({
       ...section,
-      questions: [...section.questions].sort((a, b) => {
-        const positionA = position.get(a.id) ?? Number.MAX_SAFE_INTEGER;
-        const positionB = position.get(b.id) ?? Number.MAX_SAFE_INTEGER;
-        return positionA - positionB;
-      }),
+      questions: sortByIdPosition(section.questions),
+      // FIX-09: a shuffled order must also apply to questions inside each group.
+      // Group order itself is preserved — templates like [1][2] are bound to
+      // questionNumber, so reordering groups would break the layout.
+      questionGroups: (section.questionGroups ?? []).map((group) => ({
+        ...group,
+        questions: sortByIdPosition(group.questions),
+      })),
     })),
   };
 }
 
-function stripGroupConfig(config: Record<string, unknown>, _groupType: string): Record<string, unknown> {
-  // For student-facing config, only return display-relevant data (no answer keys)
-  const safe: Record<string, unknown> = { ...config };
+/**
+ * FIX-18: display-relevant config keys that are safe to expose to candidates.
+ * Everything else (including any future answer-key-like fields) is dropped.
+ */
+export const GROUP_CONFIG_WHITELIST = new Set<string>([
+  "options",
+  "maxSelections",
+  "headingsPool",
+  "paragraphLabels",
+  "featuresPool",
+  "endingsPool",
+  "allowReuse",
+  "template",
+  "maxWords",
+  "allowNumbers",
+  "wordLimitText",
+  "optionsPool",
+  "imageMediaId",
+  "labels",
+  "minWords",
+  "sampleAnswer",
+  "bandDescriptors",
+  "topics",
+  "cueCard",
+  "bulletPoints",
+  "prepTimeSeconds",
+  "speakTimeSeconds",
+  "questions",
+]);
+
+export function stripGroupConfig(
+  config: Record<string, unknown>
+): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const key of Object.keys(config)) {
+    if (GROUP_CONFIG_WHITELIST.has(key)) {
+      safe[key] = config[key];
+    }
+  }
   return safe;
 }
 
@@ -331,7 +468,10 @@ function stripGroupConfig(config: Record<string, unknown>, _groupType: string): 
  * `acceptedAnswers` and `explanation` can never leak. Supports both
  * questionGroups (new) and questionIds (legacy) formats.
  */
-export function buildCandidateExam(exam: IExam): CandidateExam {
+export function buildCandidateExam(
+  exam: IExam,
+  urlMap?: Map<string, string>
+): CandidateExam {
   const examObj = exam.toObject() as unknown as RawExamObject;
 
   return {
@@ -339,7 +479,7 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
     title: examObj.title,
     sections: (examObj.sections ?? []).map((section) => {
       const sectionMedia = (section.mediaIds ?? [])
-        .map(toCandidateMediaItem)
+        .map((item) => toCandidateMediaItem(item, urlMap))
         .filter((m): m is CandidateMediaItem => m !== null);
       const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId);
 
@@ -351,10 +491,10 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
           id: group._id?.toString() ?? "",
           groupType: group.groupType,
           instructions: group.instructions ?? "",
-          config: stripGroupConfig(group.config ?? {}, group.groupType),
+          config: stripGroupConfig(group.config ?? {}),
           questions: (group.questions ?? []).map((q) => {
             const qMedia = (q.mediaIds ?? [])
-              .map(toCandidateMediaItem)
+              .map((item) => toCandidateMediaItem(item, urlMap))
               .filter((m): m is CandidateMediaItem => m !== null);
             const qMediaIds = (q.mediaIds ?? []).map(extractMediaId);
             return {
@@ -391,7 +531,7 @@ export function buildCandidateExam(exam: IExam): CandidateExam {
           delete question.explanation;
 
           const questionMedia = (question.mediaIds ?? [])
-            .map(toCandidateMediaItem)
+            .map((item) => toCandidateMediaItem(item, urlMap))
             .filter((m): m is CandidateMediaItem => m !== null);
           const questionMediaIds = (question.mediaIds ?? []).map(extractMediaId);
 
@@ -459,20 +599,42 @@ export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestion
           else if (section.skill === "reading") readingGrouped.push(gradable);
         }
       }
-    } else {
-      for (const item of section.questionIds ?? []) {
-        if (!isPopulatedQuestion(item)) continue;
+    }
 
-        const skill = item.skill ?? section.skill;
+    // MIXED-FORMAT FIX: `questionIds` is collected independently of groups. An
+    // exam (or even a single section, via the API) can mix legacy `questionIds`
+    // with embedded `questionGroups`; finalize grades the SUM of both buckets,
+    // so legacy sections must never be skipped just because some other section
+    // uses groups.
+    for (const item of section.questionIds ?? []) {
+      if (!isPopulatedQuestion(item)) continue;
 
-        if (skill === "listening") listening.push(item);
-        else if (skill === "reading") reading.push(item);
-        else if (skill === "writing") hasWriting = true;
-      }
+      const skill = item.skill ?? section.skill;
+
+      if (skill === "listening") listening.push(item);
+      else if (skill === "reading") reading.push(item);
+      else if (skill === "writing") hasWriting = true;
     }
   }
 
   return { listening, reading, hasListening, hasReading, hasWriting, listeningGrouped, readingGrouped, usesGroups };
+}
+
+/** Group types where a configured word limit actually applies to the answer. */
+export const WORD_LIMIT_GROUP_TYPES = new Set<string>([
+  "sentence_completion",
+  "note_completion",
+  "table_completion",
+  "summary_completion",
+  "summary_completion_options",
+  "form_completion",
+  "flow_chart_completion",
+  "short_answer",
+]);
+
+/** FIX-11: only completion/short-answer groups enforce `config.maxWords`. */
+export function shouldEnforceWordLimit(groupType: string): boolean {
+  return WORD_LIMIT_GROUP_TYPES.has(groupType);
 }
 
 /** Check word count for completion-type answers */
@@ -487,16 +649,17 @@ export function gradeQuestions(
   answers: Pick<IAttemptAnswer, "questionId" | "value">[],
   questions: GradableQuestion[]
 ): number {
+  // FIX-22: single pass into a Map instead of O(n×m) `.find()` per question.
+  const answerByQuestionId = new Map(
+    answers.map((answer) => [answer.questionId.toString(), answer.value])
+  );
   let rawScore = 0;
 
   for (const question of questions) {
-    const answer = answers.find(
-      (candidate) => candidate.questionId.toString() === question._id.toString()
-    );
+    const value = answerByQuestionId.get(question._id.toString());
+    if (value === undefined) continue;
 
-    if (!answer) continue;
-
-    if (matchAnswer(answer.value, question.acceptedAnswers ?? [])) {
+    if (matchAnswer(value, question.acceptedAnswers ?? [])) {
       rawScore += question.points ?? 1;
     }
   }
@@ -509,21 +672,24 @@ export function gradeGroupedQuestions(
   answers: Pick<IAttemptAnswer, "questionId" | "value">[],
   questions: GradableGroupQuestion[]
 ): number {
+  const answerByQuestionId = new Map(
+    answers.map((answer) => [answer.questionId.toString(), answer.value])
+  );
   let rawScore = 0;
 
   for (const question of questions) {
-    const answer = answers.find(
-      (candidate) => candidate.questionId.toString() === question._id.toString()
-    );
+    const value = answerByQuestionId.get(question._id.toString());
+    if (value === undefined) continue;
 
-    if (!answer) continue;
-
-    // Enforce word limit for completion types
-    if (!checkWordLimit(answer.value, question.groupConfig)) {
+    // Enforce word limit only for completion/short-answer types (FIX-11)
+    if (
+      shouldEnforceWordLimit(question.groupType) &&
+      !checkWordLimit(value, question.groupConfig)
+    ) {
       continue; // Over word limit = 0 marks
     }
 
-    if (matchAnswer(answer.value, question.acceptedAnswers)) {
+    if (matchAnswer(value, question.acceptedAnswers)) {
       rawScore += question.points;
     }
   }
@@ -682,13 +848,32 @@ export async function startAttempt(
   }
 
   const populatedExam = await loadPopulatedExam(examId);
-  const candidateExam = buildCandidateExam(populatedExam);
+  const mediaUrlMap = await presignMediaMap(
+    populatedExam,
+    examMediaPresignTtl(exam.durationMinutes)
+  );
+  const candidateExam = buildCandidateExam(populatedExam, mediaUrlMap);
 
-  const existingAttempt = await AttemptModel.findOne({
-    studentId,
-    examId,
-    status: "in_progress",
-  });
+  // FIX-12: when starting from an assignment, prefer the attempt already bound
+  // to that assignment so multi-attempt accounting stays correct.
+  let existingAttempt = assignmentId
+    ? await AttemptModel.findOne({ studentId, assignmentId, status: "in_progress" })
+    : null;
+
+  if (!existingAttempt) {
+    existingAttempt = await AttemptModel.findOne({
+      studentId,
+      examId,
+      status: "in_progress",
+    });
+
+    // Attach the assignment to a free attempt so this submission counts toward
+    // the assignment's maxAttempts (only when the assignment was validated).
+    if (existingAttempt && assignmentDoc && !existingAttempt.assignmentId) {
+      existingAttempt.assignmentId = assignmentDoc._id;
+      await existingAttempt.save();
+    }
+  }
 
   if (existingAttempt) {
     return serializeStartResult(
@@ -749,7 +934,6 @@ export async function finalizeAttempt(
     listening, reading,
     listeningGrouped, readingGrouped,
     hasListening, hasReading, hasWriting,
-    usesGroups,
   } = collectExamQuestionBuckets(examObj);
 
   const scores: IAttemptScores = {
@@ -763,18 +947,22 @@ export async function finalizeAttempt(
     overallBand: attempt.scores.overallBand,
   };
 
+  // MIXED-FORMAT FIX: answers live in exactly one bucket, so the score is the
+  // sum of the legacy bucket and the question-groups bucket. Previously a
+  // global `usesGroups` flag meant a mixed-format exam graded only ONE of the
+  // two, silently scoring 0 for the other format's sections.
   if (hasListening) {
-    const rawScore = usesGroups
-      ? gradeGroupedQuestions(attempt.answers, listeningGrouped)
-      : gradeQuestions(attempt.answers, listening);
+    const rawScore =
+      gradeQuestions(attempt.answers, listening) +
+      gradeGroupedQuestions(attempt.answers, listeningGrouped);
     scores.listeningRaw = rawScore;
     scores.listeningBand = calculateBandScore(rawScore, "listening");
   }
 
   if (hasReading) {
-    const rawScore = usesGroups
-      ? gradeGroupedQuestions(attempt.answers, readingGrouped)
-      : gradeQuestions(attempt.answers, reading);
+    const rawScore =
+      gradeQuestions(attempt.answers, reading) +
+      gradeGroupedQuestions(attempt.answers, readingGrouped);
     scores.readingRaw = rawScore;
     scores.readingBand = calculateBandScore(rawScore, "reading");
   }
@@ -862,7 +1050,13 @@ export async function getAttemptForRecovery(
       value: answer.value,
     })),
     exam: applyQuestionOrder(
-      buildCandidateExam(populatedExam),
+      buildCandidateExam(
+        populatedExam,
+        await presignMediaMap(
+          populatedExam,
+          examMediaPresignTtl(populatedExam.durationMinutes)
+        )
+      ),
       attempt.questionOrder ?? []
     ),
   };
@@ -997,6 +1191,10 @@ export async function getAttemptResult(
   const populatedExam = await loadPopulatedExam(examIdRef);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
   const details: ResultQuestionDetail[] = [];
+  // FIX-22: index answers once instead of scanning per question.
+  const answerByQuestionId = new Map(
+    attempt.answers.map((answer) => [answer.questionId.toString(), answer.value])
+  );
 
   for (const section of examObj.sections ?? []) {
     const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
@@ -1005,15 +1203,14 @@ export async function getAttemptResult(
       // New path: question groups
       for (const group of section.questionGroups!) {
         for (const q of group.questions) {
-          const answer = attempt.answers.find(
-            (candidate) => candidate.questionId.toString() === q._id.toString()
-          );
-          const studentAnswer = answer ? answer.value : null;
+          const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
           const acceptedAnswers = q.acceptedAnswers ?? [];
 
           let isCorrect = false;
           if (studentAnswer !== null) {
-            const withinWordLimit = checkWordLimit(studentAnswer, group.config ?? {});
+            const withinWordLimit =
+              !shouldEnforceWordLimit(group.groupType) ||
+              checkWordLimit(studentAnswer, group.config ?? {});
             isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
           }
 
@@ -1034,10 +1231,7 @@ export async function getAttemptResult(
         if (!isPopulatedQuestion(item)) continue;
 
         const question = item as RawPopulatedQuestion;
-        const answer = attempt.answers.find(
-          (candidate) => candidate.questionId.toString() === question._id.toString()
-        );
-        const studentAnswer = answer ? answer.value : null;
+        const studentAnswer = answerByQuestionId.get(question._id.toString()) ?? null;
         const acceptedAnswers = question.acceptedAnswers ?? [];
 
         details.push({

@@ -77,7 +77,6 @@ const AttemptSchema = new Schema<IAttempt>(
   { timestamps: true, versionKey: false }
 );
 
-AttemptSchema.index({ studentId: 1, examId: 1 });
 AttemptSchema.index({ examId: 1, status: 1 });
 AttemptSchema.index({ assignmentId: 1 });
 AttemptSchema.index({ status: 1, expiresAt: 1 });

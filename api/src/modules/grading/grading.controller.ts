@@ -16,9 +16,15 @@ function requireUser(req: Request): NonNullable<Request["user"]> {
 
 export async function getPending(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
+  const page = Number(req.query.page);
+  const limit = Number(req.query.limit);
   const { items, totalPending } = await gradingService.getPendingWritingSubmissions(
     user.id,
-    user.role
+    user.role,
+    {
+      page: Number.isFinite(page) && page > 0 ? page : undefined,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+    }
   );
   sendSuccess(res, items, 200, { totalPending });
 }

@@ -24,14 +24,20 @@ function clearRefreshCookie(res: Response): void {
 }
 
 export async function register(req: Request, res: Response): Promise<void> {
-  const { user, accessToken, refreshToken } = await authService.register(req.body);
+  const { user, accessToken, refreshToken } = await authService.register(
+    req.body,
+    req.get("user-agent") ?? undefined
+  );
 
   setRefreshCookie(res, refreshToken);
   sendSuccess(res, { user: toSafeUser(user), accessToken }, 201);
 }
 
 export async function login(req: Request, res: Response): Promise<void> {
-  const { user, accessToken, refreshToken } = await authService.login(req.body);
+  const { user, accessToken, refreshToken } = await authService.login(
+    req.body,
+    req.get("user-agent") ?? undefined
+  );
 
   setRefreshCookie(res, refreshToken);
   sendSuccess(res, { user: toSafeUser(user), accessToken });
@@ -44,11 +50,21 @@ export async function refresh(req: Request, res: Response): Promise<void> {
     throw new UnauthorizedError("REFRESH_TOKEN_INVALID", "Refresh Token không hợp lệ.");
   }
 
-  const { accessToken } = await authService.refresh(token);
+  const { accessToken, refreshToken } = await authService.refresh(
+    token,
+    req.get("user-agent") ?? undefined
+  );
+
+  // FIX-04: rotate the refresh cookie alongside the access token.
+  setRefreshCookie(res, refreshToken);
   sendSuccess(res, { accessToken });
 }
 
-export async function logout(_req: Request, res: Response): Promise<void> {
+export async function logout(req: Request, res: Response): Promise<void> {
+  const token = req.cookies?.[REFRESH_COOKIE_NAME] as string | undefined;
+
+  // FIX-04: revoke the session server-side (idempotent) before clearing cookie.
+  await authService.logout(token);
   clearRefreshCookie(res);
   sendSuccess(res, { message: "Đăng xuất thành công" });
 }

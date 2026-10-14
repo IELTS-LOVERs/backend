@@ -1,5 +1,6 @@
 import mongoose, { type UpdateQuery } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel, type IQuestion } from "./question.model.js";
 import type { CreateQuestionBody, ListQuestionsQuery, UpdateQuestionBody } from "./question.validation.js";
@@ -105,7 +106,8 @@ export async function list(
   }
 
   if (filters.search && filters.search.trim().length > 0) {
-    const searchRegex = new RegExp(filters.search.trim(), "i");
+    // Same hardening as user search (FIX-21): escape before building the regex.
+    const searchRegex = new RegExp(escapeRegExp(filters.search.trim()), "i");
     query.$or = [{ prompt: searchRegex }, { content: searchRegex }];
   }
 

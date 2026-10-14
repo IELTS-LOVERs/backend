@@ -73,12 +73,19 @@ export async function logEvent(
     );
   }
 
+  // FIX-16: the authoritative timestamp is always server-side. A client-supplied
+  // timestamp is preserved (untrusted) inside metadata.clientTimestamp.
+  const metadata: Record<string, unknown> = { ...(data.metadata ?? {}) };
+  if (data.timestamp) {
+    metadata.clientTimestamp = data.timestamp;
+  }
+
   await ExamEventModel.create({
     attemptId: attempt._id,
     studentId: new mongoose.Types.ObjectId(studentId),
     type: data.type,
-    timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
-    metadata: data.metadata ?? {},
+    timestamp: new Date(),
+    metadata,
   });
 
   // LIMITATION (MVP): the spec counts PASTE >= 3 "within the Writing section",

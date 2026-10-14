@@ -5,6 +5,7 @@ import { ExamEventModel } from "./exam-event.model.js";
 import {
   evaluateSuspicious,
   getSuspiciousAttempts,
+  logEvent,
   summarizeEvents,
 } from "./anti-cheat.service.js";
 
@@ -160,6 +161,48 @@ describe("getSuspiciousAttempts", () => {
 
     const result = await getSuspiciousAttempts(teacherId, "teacher", 50);
     expect(result).toEqual({ items: [], total: 0 });
+  });
+});
+
+describe("logEvent server timestamp (FIX-16)", () => {
+  it("always stores a server timestamp and keeps the client one in metadata", async () => {
+    const attemptId = new mongoose.Types.ObjectId();
+    const studentId = new mongoose.Types.ObjectId();
+
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce({
+      _id: attemptId,
+      studentId,
+      status: "in_progress",
+      suspicious: false,
+    } as never);
+    const createSpy = vi
+      .spyOn(ExamEventModel, "create")
+      .mockResolvedValueOnce({} as never);
+    vi.spyOn(ExamEventModel, "countDocuments").mockResolvedValue(0 as never);
+
+    const clientTimestamp = "2020-01-01T00:00:00.000Z";
+    const before = Date.now();
+    await logEvent(
+      {
+        attemptId: attemptId.toString(),
+        type: "PASTE",
+        timestamp: clientTimestamp,
+        metadata: { extra: 1 },
+      },
+      studentId.toString()
+    );
+    const after = Date.now();
+
+    const created = createSpy.mock.calls[0][0] as unknown as {
+      timestamp: Date;
+      metadata: Record<string, unknown>;
+    };
+
+    const storedTime = created.timestamp.getTime();
+    expect(storedTime).toBeGreaterThanOrEqual(before);
+    expect(storedTime).toBeLessThanOrEqual(after);
+    expect(created.metadata.clientTimestamp).toBe(clientTimestamp);
+    expect(created.metadata.extra).toBe(1);
   });
 });
 
