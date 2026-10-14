@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const SkillEnum = z.enum(["listening", "reading", "writing", "speaking"]);
+const SkillEnum = z.enum(["listening", "reading", "writing"]);
 
 const QuestionGroupTypeEnum = z.enum([
   "multiple_choice_single",
@@ -23,9 +23,6 @@ const QuestionGroupTypeEnum = z.enum([
   "short_answer",
   "writing_task_1",
   "writing_task_2",
-  "speaking_part_1",
-  "speaking_part_2",
-  "speaking_part_3",
 ]);
 
 export const QuestionGroupConfigSchema = z
@@ -42,7 +39,7 @@ export const QuestionGroupConfigSchema = z
     allowNumbers: z.boolean().optional(),
     wordLimitText: z.string().optional(),
     optionsPool: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
-    imageMediaId: z.string().optional(),
+    imageMediaId: z.string().nullish(),
     labels: z
       .array(
         z.object({
@@ -116,11 +113,26 @@ export const CreateExamSchema = z.object({
   }),
 });
 
+/**
+ * Update body MUST be a genuine partial schema without Zod `.default()` injection.
+ * In Zod v4, `.partial()` does NOT neutralise an inner `.default()`:
+ * `CreateExamSchema.shape.body.partial()` still yields `durationMinutes: 60`
+ * and `sections: []` for a `{ title }`-only request, silently wiping all
+ * sections and resetting the duration on every partial PUT. Every field is
+ * therefore declared explicitly `.optional()` here.
+ */
 export const UpdateExamSchema = z.object({
   params: z.object({
     id: z.string().min(1, "Thiếu ID đề thi"),
   }),
-  body: CreateExamSchema.shape.body.partial(),
+  body: z.object({
+    title: z.string().min(3, "Tiêu đề tối thiểu 3 ký tự").optional(),
+    description: z.string().optional().nullable(),
+    durationMinutes: z.number().int().min(10).max(180).optional(),
+    sections: z.array(ExamSectionInputSchema).optional(),
+    openAt: z.iso.datetime().optional().nullable(),
+    closeAt: z.iso.datetime().optional().nullable(),
+  }),
 });
 
 export const UpdateExamMetadataSchema = z.object({
@@ -129,7 +141,7 @@ export const UpdateExamMetadataSchema = z.object({
   }),
   body: z.object({
     title: z.string().min(3, "Tiêu đề tối thiểu 3 ký tự").optional(),
-    description: z.string().optional(),
+    description: z.string().optional().nullable(),
     openAt: z.iso.datetime().optional().nullable(),
     closeAt: z.iso.datetime().optional().nullable(),
   }),

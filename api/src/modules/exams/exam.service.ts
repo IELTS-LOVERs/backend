@@ -1,7 +1,7 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
-import { buildCandidateExam, type CandidateExam } from "../attempts/attempt.service.js";
+import { buildCandidateExam, toCandidateMediaItem, type CandidateExam, type CandidateMediaItem } from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
@@ -83,6 +83,7 @@ export interface ExamSectionDetail {
   passageText: string | null;
   transcript: string | null;
   mediaIds: string[];
+  media: CandidateMediaItem[];
   questionGroups: SerializedQuestionGroup[];
   /** @deprecated Legacy field. Empty when using questionGroups. */
   questionIds: string[];
@@ -138,7 +139,6 @@ interface PopulatedQuestion {
 export function getDefaultSectionTitle(skill: SkillType, part: number): string {
   if (skill === 'reading') return `Passage ${part}`;
   if (skill === 'writing') return `Task ${part}`;
-  if (skill === 'speaking') return `Part ${part}`;
   return `Part ${part}`;
 }
 
@@ -154,6 +154,16 @@ function toSafeObjectId(id: unknown): Types.ObjectId | undefined {
     return new mongoose.Types.ObjectId(str);
   }
   return undefined;
+}
+
+/** Extract an ObjectId string from a raw ObjectId, a populated Media doc, or null. */
+function extractMediaId(item: unknown): string {
+  if (item === null || item === undefined) return "";
+  if (typeof item === "object" && "_id" in item) {
+    const id = (item as { _id?: unknown })._id;
+    return id ? String(id) : "";
+  }
+  return String(item);
 }
 
 function mapQuestionItemInput(item: QuestionItemInput): Partial<IQuestionItem> {
@@ -356,14 +366,17 @@ export async function getById(
   userId?: string,
   role?: string
 ): Promise<ExamDetail | StudentExamDetail> {
-  const exam = await ExamModel.findById(id).populate("sections.questionIds");
+  const exam = await ExamModel.findById(id).populate([
+    { path: "sections.mediaIds", model: "Media" },
+    "sections.questionIds",
+  ]);
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
   }
 
   if (role === "student") {
-    if (exam.status !== "published") {
+    if (exam.status === "draft") {
       throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
     }
 
@@ -380,6 +393,10 @@ export async function getById(
 
   const sections: ExamSectionDetail[] = exam.sections.map((section) => {
     const usesGroups = sectionUsesGroups(section);
+    const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId).filter(Boolean);
+    const sectionMedia = (section.mediaIds ?? [])
+      .map(toCandidateMediaItem)
+      .filter((media): media is CandidateMediaItem => media !== null);
 
     if (usesGroups) {
       return {
@@ -390,7 +407,8 @@ export async function getById(
         instructions: section.instructions ?? null,
         passageText: section.passageText ?? null,
         transcript: section.transcript ?? null,
-        mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
+        mediaIds: sectionMediaIds,
+        media: sectionMedia,
         questionGroups: (section.questionGroups ?? []).map(serializeQuestionGroup),
         questionIds: [],
         questions: [],
@@ -411,7 +429,8 @@ export async function getById(
       instructions: section.instructions ?? null,
       passageText: section.passageText ?? null,
       transcript: section.transcript ?? null,
-      mediaIds: (section.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
+      mediaIds: sectionMediaIds,
+      media: sectionMedia,
       questionGroups: [],
       questionIds: questions.map((question) => question.id),
       questions,
@@ -574,7 +593,7 @@ export async function publish(
             `Nhóm câu hỏi trong phần ${section.title || section.part} không được để trống.`
           );
         }
-        if (section.skill !== "writing" && section.skill !== "speaking") {
+        if (section.skill !== "writing") {
           for (const q of group.questions) {
             if (!q.acceptedAnswers || q.acceptedAnswers.length === 0) {
               throw new BadRequestError(
@@ -603,6 +622,13 @@ export async function migrateExamToGroups(
   await exam.populate("sections.questionIds");
 
   let migratedSections = 0;
+  // IELTS numbering is continuous per skill across sections (Listening 1–40, Reading 1–40...),
+  // matching the builder's global `numbering` map. Keep one counter per skill.
+  const skillCounters: Record<SkillType, number> = {
+    listening: 0,
+    reading: 0,
+    writing: 0,
+  };
 
   for (const section of exam.sections) {
     if (sectionUsesGroups(section)) continue;
@@ -616,7 +642,6 @@ export async function migrateExamToGroups(
 
     const groups: IQuestionGroup[] = [];
     let currentGroup: IQuestionGroup | null = null;
-    let qNumber = 1;
 
     for (const q of questions) {
       const groupType = mapLegacyTypeToGroupType(q.type) as QuestionGroupType;
@@ -632,9 +657,11 @@ export async function migrateExamToGroups(
         groups.push(currentGroup);
       }
 
+      skillCounters[section.skill] += 1;
+
       currentGroup.questions.push({
         _id: new mongoose.Types.ObjectId(),
-        questionNumber: qNumber++,
+        questionNumber: skillCounters[section.skill],
         prompt: q.prompt,
         acceptedAnswers: q.acceptedAnswers ?? [],
         points: q.points ?? 1,

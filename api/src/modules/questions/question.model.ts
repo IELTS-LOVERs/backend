@@ -2,7 +2,7 @@ import mongoose, { type Types } from "mongoose";
 
 const { Schema, model } = mongoose;
 
-export type SkillType = "listening" | "reading" | "writing" | "speaking";
+export type SkillType = "listening" | "reading" | "writing";
 
 // New: Used for question groups embedded in exams
 export type QuestionGroupType =
@@ -25,10 +25,7 @@ export type QuestionGroupType =
   | "diagram_labelling"
   | "short_answer"
   | "writing_task_1"
-  | "writing_task_2"
-  | "speaking_part_1"
-  | "speaking_part_2"
-  | "speaking_part_3";
+  | "writing_task_2";
 
 export type QuestionType =
   | "multiple_choice"          // legacy, maps to multiple_choice_single
@@ -72,7 +69,7 @@ export interface IQuestion extends mongoose.Document {
 
 const QuestionSchema = new Schema<IQuestion>(
   {
-    skill: { type: String, enum: ["listening", "reading", "writing", "speaking"], required: true },
+    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
     type: { type: String, required: true },
     part: { type: Number, required: true },
     prompt: { type: String, required: true },

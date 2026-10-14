@@ -54,7 +54,7 @@ export interface IExam extends mongoose.Document {
 const QuestionItemSchema = new Schema<IQuestionItem>(
   {
     questionNumber: { type: Number, required: true },
-    prompt: { type: String, required: true },
+    prompt: { type: String, default: "" },
     acceptedAnswers: [{ type: String, trim: true }],
     points: { type: Number, default: 1 },
     explanation: { type: String },
@@ -75,7 +75,7 @@ const QuestionGroupSchema = new Schema<IQuestionGroup>(
 
 const ExamSectionSchema = new Schema<IExamSection>(
   {
-    skill: { type: String, enum: ["listening", "reading", "writing", "speaking"], required: true },
+    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
     part: { type: Number, required: true },
     title: { type: String, default: "" },
     instructions: { type: String },

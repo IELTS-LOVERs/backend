@@ -42,6 +42,21 @@ describe("UpdateQuestionSchema", () => {
 
     expect(result.success).toBe(true);
   });
+
+  it("does not inject schema defaults into a partial body (would wipe answers/metadata)", () => {
+    const result = UpdateQuestionSchema.safeParse({
+      params: { id: "66e8621c262f3b9200000003" },
+      body: { prompt: "Updated prompt" },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.body.acceptedAnswers).toBeUndefined();
+      expect(result.data.body.mediaIds).toBeUndefined();
+      expect(result.data.body.data).toBeUndefined();
+      expect(result.data.body.points).toBeUndefined();
+    }
+  });
 });
 
 describe("ListQuestionsSchema", () => {

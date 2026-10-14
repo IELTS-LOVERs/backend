@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import mongoose, { type Types } from "mongoose";
 import { EXAM_GRACE_PERIOD_SECONDS, calculateBandScore } from "../../config/constants.js";
 import { env } from "../../config/env.js";
@@ -231,7 +232,7 @@ function isPopulatedQuestion(value: unknown): value is RawPopulatedQuestion {
   );
 }
 
-function toCandidateMediaItem(item: unknown): CandidateMediaItem | null {
+export function toCandidateMediaItem(item: unknown): CandidateMediaItem | null {
   if (
     typeof item === "object" &&
     item !== null &&
@@ -867,6 +868,15 @@ export async function getAttemptForRecovery(
   };
 }
 
+export function toSafeQuestionObjectId(id: unknown): Types.ObjectId {
+  const str = String(id ?? "").trim();
+  if (mongoose.Types.ObjectId.isValid(str) && /^[0-9a-fA-F]{24}$/.test(str)) {
+    return new mongoose.Types.ObjectId(str);
+  }
+  const hash = crypto.createHash("md5").update(str).digest("hex").slice(0, 24);
+  return new mongoose.Types.ObjectId(hash);
+}
+
 export async function autosaveAnswers(
   attemptId: string,
   studentId: string,
@@ -890,17 +900,19 @@ export async function autosaveAnswers(
   const savedAt = new Date();
 
   for (const incoming of answers) {
+    if (!incoming.questionId) continue;
+    const qObjectId = toSafeQuestionObjectId(incoming.questionId);
     const existing = attempt.answers.find(
-      (answer) => answer.questionId.toString() === incoming.questionId
+      (answer) => answer.questionId.toString() === qObjectId.toString()
     );
 
     if (existing) {
-      existing.value = incoming.value;
+      existing.value = incoming.value ?? "";
       existing.savedAt = savedAt;
     } else {
       attempt.answers.push({
-        questionId: new mongoose.Types.ObjectId(incoming.questionId),
-        value: incoming.value,
+        questionId: qObjectId,
+        value: incoming.value ?? "",
         savedAt,
       });
     }

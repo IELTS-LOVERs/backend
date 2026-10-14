@@ -16,7 +16,7 @@ const EnvSchema = z.object({
   MONGODB_URI: z.string().min(1, "MONGODB_URI là bắt buộc"),
 
   JWT_ACCESS_SECRET: z.string().min(1, "JWT_ACCESS_SECRET là bắt buộc"),
-  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default("15m"),
+  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default("2h"),
   JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET là bắt buộc"),
   JWT_REFRESH_EXPIRES_IN: z.string().min(1).default("7d"),
 

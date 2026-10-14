@@ -33,6 +33,14 @@ interface PopulatedAnalyticsSection {
   part: number;
   title: string;
   questionIds?: unknown[];
+  questionGroups?: Array<{
+    groupType?: string;
+    questions?: Array<{
+      _id: Types.ObjectId | string;
+      prompt?: string;
+      acceptedAnswers?: string[];
+    }>;
+  }>;
 }
 
 interface AnalyticsAttempt {
@@ -104,10 +112,41 @@ export async function getExamAnalytics(
           accuracy: 0,
         } satisfies SectionAccuracy);
 
-      for (const item of section.questionIds ?? []) {
-        if (!isPopulatedQuestion(item)) continue;
+      const itemsToProcess: Array<{
+        _id: Types.ObjectId | string;
+        prompt?: string;
+        skill: SkillType;
+        part: number;
+        acceptedAnswers: string[];
+      }> = [];
 
-        const question = item as PopulatedAnalyticsQuestion;
+      if (Array.isArray(section.questionGroups) && section.questionGroups.length > 0) {
+        for (const group of section.questionGroups) {
+          for (const q of group.questions ?? []) {
+            itemsToProcess.push({
+              _id: q._id,
+              prompt: q.prompt,
+              skill: section.skill,
+              part: section.part,
+              acceptedAnswers: q.acceptedAnswers ?? [],
+            });
+          }
+        }
+      } else {
+        for (const item of section.questionIds ?? []) {
+          if (!isPopulatedQuestion(item)) continue;
+          const question = item as PopulatedAnalyticsQuestion;
+          itemsToProcess.push({
+            _id: question._id,
+            prompt: question.prompt,
+            skill: question.skill ?? section.skill,
+            part: question.part ?? section.part,
+            acceptedAnswers: question.acceptedAnswers ?? [],
+          });
+        }
+      }
+
+      for (const question of itemsToProcess) {
         const acceptedAnswers = question.acceptedAnswers ?? [];
         const answer = attempt.answers.find(
           (candidate) => candidate.questionId.toString() === question._id.toString()
@@ -126,8 +165,8 @@ export async function getExamAnalytics(
           ({
             questionId: questionKey,
             prompt: question.prompt ?? "",
-            skill: question.skill ?? section.skill,
-            part: question.part ?? section.part,
+            skill: question.skill,
+            part: question.part,
             answered: 0,
             correct: 0,
             accuracy: 0,

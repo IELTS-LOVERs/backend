@@ -14,6 +14,20 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
+  if (err?.name === "ValidationError") {
+    const details =
+      err?.errors && typeof err.errors === "object"
+        ? Object.entries(err.errors as Record<string, { message?: string }>).map(
+            ([path, issue]) => ({ path, message: issue?.message ?? "Dữ liệu không hợp lệ." })
+          )
+        : undefined;
+    sendError(
+      res,
+      new BadRequestError("VALIDATION_ERROR", err.message || "Dữ liệu không hợp lệ.", details)
+    );
+    return;
+  }
+
   logger.error("request.error", {
     name: err?.name ?? "Error",
     message: err?.message ?? "Unknown error",

@@ -62,6 +62,19 @@ describe("UpdateExamSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("does not inject schema defaults into a partial body (would wipe sections)", () => {
+    const result = UpdateExamSchema.safeParse({
+      params: { id: "66e8641c262f3b9200000004" },
+      body: { title: "Updated title" },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.body.sections).toBeUndefined();
+      expect(result.data.body.durationMinutes).toBeUndefined();
+    }
+  });
+
   it("rejects an invalid partial field", () => {
     const result = UpdateExamSchema.safeParse({
       params: { id: "66e8641c262f3b9200000004" },

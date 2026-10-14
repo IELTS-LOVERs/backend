@@ -41,7 +41,7 @@ export interface IAttempt extends mongoose.Document {
 const AttemptAnswerSchema = new Schema<IAttemptAnswer>(
   {
     questionId: { type: Schema.Types.ObjectId, ref: "Question", required: true },
-    value: { type: String, required: true },
+    value: { type: String, default: "" },
     savedAt: { type: Date, default: Date.now },
   },
   { _id: false }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const SkillEnum = z.enum(["listening", "reading", "writing", "speaking"]);
+const SkillEnum = z.enum(["listening", "reading", "writing"]);
 
 export const CreateQuestionSchema = z.object({
   body: z.object({
@@ -17,11 +17,29 @@ export const CreateQuestionSchema = z.object({
   }),
 });
 
+/**
+ * Update body MUST be a genuine partial schema without Zod `.default()` injection.
+ * In Zod v4, `.partial()` leaves inner `.default()` values in place, so
+ * `CreateQuestionSchema.shape.body.partial()` would inject `acceptedAnswers: []`,
+ * `mediaIds: []`, `data: {}` and `points: 1` into every PUT, wiping the stored
+ * answer key / media / metadata whenever a caller updates just the prompt.
+ */
 export const UpdateQuestionSchema = z.object({
   params: z.object({
     id: z.string().min(1, "Thiếu ID câu hỏi"),
   }),
-  body: CreateQuestionSchema.shape.body.partial(),
+  body: z.object({
+    skill: SkillEnum.optional(),
+    type: z.string().min(1, "Loại câu hỏi không hợp lệ").optional(),
+    part: z.number().int().min(1).max(4).optional(),
+    prompt: z.string().min(1, "Nội dung câu hỏi không được để trống").optional(),
+    content: z.string().optional(),
+    data: z.record(z.string(), z.any()).optional(),
+    acceptedAnswers: z.array(z.string()).optional(),
+    points: z.number().optional(),
+    explanation: z.string().optional(),
+    mediaIds: z.array(z.string()).optional(),
+  }),
 });
 
 export const ListQuestionsSchema = z.object({
