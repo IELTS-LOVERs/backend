@@ -216,8 +216,20 @@ export async function deleteMedia(
   }
 
   const [usedByQuestion, usedByExam] = await Promise.all([
-    QuestionModel.exists({ mediaIds: media._id }),
-    ExamModel.exists({ "sections.mediaIds": media._id }),
+    QuestionModel.exists({
+      $or: [
+        { "questions.mediaIds": media._id },
+        // Group-level image stored as an id string inside the group config.
+        { "config.imageMediaId": media._id.toString() },
+      ],
+    }),
+    ExamModel.exists({
+      $or: [
+        { "sections.mediaIds": media._id },
+        { "sections.questionGroups.questions.mediaIds": media._id },
+        { "sections.questionGroups.config.imageMediaId": media._id.toString() },
+      ],
+    }),
   ]);
 
   if (usedByQuestion || usedByExam) {

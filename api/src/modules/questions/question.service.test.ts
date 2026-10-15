@@ -6,24 +6,30 @@ import { QuestionModel, type IQuestion } from "./question.model.js";
 import { assertOwner, getById, list, remove, serializeQuestion } from "./question.service.js";
 
 describe("serializeQuestion", () => {
-  it("converts ObjectIds to strings and normalizes null fields", () => {
-    const questionId = new mongoose.Types.ObjectId();
+  it("serializes a bank question group and normalizes null fields", () => {
+    const groupId = new mongoose.Types.ObjectId();
+    const itemId = new mongoose.Types.ObjectId();
     const mediaId = new mongoose.Types.ObjectId();
     const creatorId = new mongoose.Types.ObjectId();
     const now = new Date();
 
     const mockQuestion = {
-      _id: questionId,
+      _id: groupId,
       skill: "listening",
-      type: "multiple_choice",
       part: 1,
-      prompt: "Choose the correct answer",
-      content: undefined,
-      data: { options: ["A", "B", "C"] },
-      acceptedAnswers: ["A"],
-      points: 1,
-      explanation: undefined,
-      mediaIds: [mediaId],
+      groupType: "multiple_choice_single",
+      instructions: "Choose the correct answer",
+      config: { options: [{ id: "A", text: "One" }] },
+      questions: [
+        {
+          _id: itemId,
+          prompt: "Pick one",
+          acceptedAnswers: ["A"],
+          points: 1,
+          explanation: undefined,
+          mediaIds: [mediaId],
+        },
+      ],
       createdBy: creatorId,
       createdAt: now,
       updatedAt: now,
@@ -31,15 +37,16 @@ describe("serializeQuestion", () => {
 
     const serialized = serializeQuestion(mockQuestion);
 
-    expect(serialized.id).toBe(questionId.toString());
+    expect(serialized.id).toBe(groupId.toString());
     expect(serialized.skill).toBe("listening");
-    expect(serialized.type).toBe("multiple_choice");
+    expect(serialized.groupType).toBe("multiple_choice_single");
     expect(serialized.part).toBe(1);
-    expect(serialized.content).toBeNull();
-    expect(serialized.explanation).toBeNull();
-    expect(serialized.mediaIds).toEqual([mediaId.toString()]);
+    expect(serialized.instructions).toBe("Choose the correct answer");
+    expect(serialized.questionCount).toBe(1);
+    expect(serialized.questions[0].id).toBe(itemId.toString());
+    expect(serialized.questions[0].mediaIds).toEqual([mediaId.toString()]);
+    expect(serialized.questions[0].explanation).toBeNull();
     expect(serialized.createdBy).toBe(creatorId.toString());
-    expect(serialized.points).toBe(1);
   });
 });
 
@@ -63,7 +70,7 @@ describe("assertOwner", () => {
 });
 
 describe("list questions with search", () => {
-  it("builds $or regex query when search filter is supplied", async () => {
+  it("builds an $or regex query across instructions and question prompts", async () => {
     let capturedQuery: unknown;
     const mockFind = {
       sort: vi.fn().mockReturnThis(),
@@ -83,12 +90,12 @@ describe("list questions with search", () => {
     });
 
     expect(capturedQuery).toBeDefined();
-    const queryObj = capturedQuery as { $or?: Array<{ prompt?: RegExp; content?: RegExp }> };
+    const queryObj = capturedQuery as { $or?: Array<Record<string, RegExp>> };
     expect(queryObj.$or).toHaveLength(2);
-    expect(queryObj.$or?.[0].prompt?.source).toBe("environment");
-    expect(queryObj.$or?.[0].prompt?.flags).toContain("i");
-    expect(queryObj.$or?.[1].content?.source).toBe("environment");
-    expect(queryObj.$or?.[1].content?.flags).toContain("i");
+    expect(queryObj.$or?.[0].instructions?.source).toBe("environment");
+    expect(queryObj.$or?.[0].instructions?.flags).toContain("i");
+    expect(queryObj.$or?.[1]["questions.prompt"]?.source).toBe("environment");
+    expect(queryObj.$or?.[1]["questions.prompt"]?.flags).toContain("i");
   });
 
   it("escapes regex metacharacters so invalid patterns cannot throw (logic fix)", async () => {
@@ -112,16 +119,16 @@ describe("list questions with search", () => {
     // Before the fix this threw SyntaxError (invalid regex) → HTTP 500.
     const invalid = await runList("[");
     expect(invalid.result).toBeDefined();
-    expect((invalid.capturedQuery as { $or?: Array<{ prompt?: RegExp }> }).$or?.[0].prompt?.source).toBe(
-      "\\["
-    );
+    expect(
+      (invalid.capturedQuery as { $or?: Array<Record<string, RegExp>> }).$or?.[0].instructions?.source
+    ).toBe("\\[");
 
     // Catastrophic-backtracking input must be treated as a literal too.
     const redos = await runList("(a+)+$");
     expect(redos.result).toBeDefined();
-    expect((redos.capturedQuery as { $or?: Array<{ prompt?: RegExp }> }).$or?.[0].prompt?.source).toBe(
-      "\\(a\\+\\)\\+\\$"
-    );
+    expect(
+      (redos.capturedQuery as { $or?: Array<Record<string, RegExp>> }).$or?.[0].instructions?.source
+    ).toBe("\\(a\\+\\)\\+\\$");
   });
 });
 
@@ -137,33 +144,10 @@ describe("remove question referential integrity", () => {
     );
   });
 
-  it("blocks deletion when the question belongs to a published or closed exam", async () => {
-    vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce({
-      _id: questionId,
-      createdBy: userId,
-    } as never);
-    vi.spyOn(ExamModel, "findOne").mockReturnValueOnce({
-      select: vi.fn().mockResolvedValue({
-        _id: new mongoose.Types.ObjectId(),
-        title: "Final Mock",
-        status: "published",
-      }),
-    } as never);
-    const deleteSpy = vi.spyOn(QuestionModel, "deleteOne");
-
-    await expect(remove(questionId.toString(), userId.toString(), "teacher")).rejects.toThrow(
-      BadRequestError
-    );
-    expect(deleteSpy).not.toHaveBeenCalled();
-  });
-
   it("deletes the question when it is not used by any published or closed exam", async () => {
     vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce({
       _id: questionId,
       createdBy: userId,
-    } as never);
-    vi.spyOn(ExamModel, "findOne").mockReturnValueOnce({
-      select: vi.fn().mockResolvedValue(null),
     } as never);
     const deleteSpy = vi
       .spyOn(QuestionModel, "deleteOne")
@@ -180,21 +164,25 @@ describe("BUG-08 question bank scope", () => {
   const otherTeacherId = new mongoose.Types.ObjectId().toString();
 
   function mockQuestionDoc() {
-    const questionId = new mongoose.Types.ObjectId();
+    const groupId = new mongoose.Types.ObjectId();
     const now = new Date();
 
     return {
-      _id: questionId,
+      _id: groupId,
       skill: "reading",
-      type: "multiple_choice",
       part: 1,
-      prompt: "Pick one",
-      content: undefined,
-      data: {},
-      acceptedAnswers: ["A"],
-      points: 1,
-      explanation: undefined,
-      mediaIds: [],
+      groupType: "multiple_choice_single",
+      instructions: "Pick one",
+      config: {},
+      questions: [
+        {
+          _id: new mongoose.Types.ObjectId(),
+          prompt: "Pick one",
+          acceptedAnswers: ["A"],
+          points: 1,
+          mediaIds: [],
+        },
+      ],
       createdBy: new mongoose.Types.ObjectId(otherTeacherId),
       createdAt: now,
       updatedAt: now,
@@ -248,10 +236,10 @@ describe("BUG-08 question bank scope", () => {
   it("allows scope=all and admin to read another teacher's question", async () => {
     vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(mockQuestionDoc() as never);
     const shared = await getById("question-1", teacherId, "teacher", "all");
-    expect(shared.prompt).toBe("Pick one");
+    expect(shared.questions[0].prompt).toBe("Pick one");
 
     vi.spyOn(QuestionModel, "findById").mockResolvedValueOnce(mockQuestionDoc() as never);
     const adminView = await getById("question-1", "admin-1", "admin");
-    expect(adminView.prompt).toBe("Pick one");
+    expect(adminView.questions[0].prompt).toBe("Pick one");
   });
 });

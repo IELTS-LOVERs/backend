@@ -6,16 +6,15 @@ describe("QuestionModel", () => {
   it("registers the expected schema paths", () => {
     expect(QuestionModel.modelName).toBe("Question");
     expect(QuestionModel.schema.path("skill")).toBeDefined();
-    expect(QuestionModel.schema.path("type")).toBeDefined();
     expect(QuestionModel.schema.path("part")).toBeDefined();
-    expect(QuestionModel.schema.path("prompt")).toBeDefined();
-    expect(QuestionModel.schema.path("data")).toBeDefined();
-    expect(QuestionModel.schema.path("acceptedAnswers")).toBeDefined();
-    expect(QuestionModel.schema.path("mediaIds")).toBeDefined();
+    expect(QuestionModel.schema.path("groupType")).toBeDefined();
+    expect(QuestionModel.schema.path("instructions")).toBeDefined();
+    expect(QuestionModel.schema.path("config")).toBeDefined();
+    expect(QuestionModel.schema.path("questions")).toBeDefined();
     expect(QuestionModel.schema.path("createdBy")).toBeDefined();
   });
 
-  it("requires skill, type, part, prompt and createdBy", async () => {
+  it("requires skill, part, groupType, createdBy and at least one question", async () => {
     let error: ValidationError | undefined;
     try {
       await new QuestionModel({}).validate();
@@ -24,24 +23,26 @@ describe("QuestionModel", () => {
     }
 
     expect(error?.errors.skill).toBeDefined();
-    expect(error?.errors.type).toBeDefined();
     expect(error?.errors.part).toBeDefined();
-    expect(error?.errors.prompt).toBeDefined();
+    expect(error?.errors.groupType).toBeDefined();
     expect(error?.errors.createdBy).toBeDefined();
+    expect(error?.errors.questions).toBeDefined();
   });
 
-  it("applies defaults for points and data", async () => {
+  it("applies defaults for instructions, config and question items", async () => {
     const doc = new QuestionModel({
       skill: "listening",
-      type: "form_completion",
       part: 1,
-      prompt: "Write NO MORE THAN TWO WORDS.",
+      groupType: "form_completion",
       createdBy: new mongoose.Types.ObjectId(),
+      questions: [{ prompt: "City: [1]" }],
     });
 
     await expect(doc.validate()).resolves.toBeUndefined();
-    expect(doc.points).toBe(1);
-    expect(doc.data).toEqual({});
-    expect(doc.acceptedAnswers).toHaveLength(0);
+    expect(doc.instructions).toBe("");
+    expect(doc.config).toEqual({});
+    expect(doc.questions).toHaveLength(1);
+    expect(doc.questions[0].points).toBe(1);
+    expect(doc.questions[0].acceptedAnswers).toHaveLength(0);
   });
 });

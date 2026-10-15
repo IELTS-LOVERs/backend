@@ -11,36 +11,44 @@ import {
   buildCandidateExam,
   canAccessAttemptResult,
   collectCandidateQuestionIds,
+  collectExamMediaIds,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
   getAttemptForRecovery,
   getAttemptResult,
   gradeGroupedQuestions,
-  gradeQuestions,
   shuffleQuestionIds,
   startAttempt,
   stripGroupConfig,
   submitAttempt,
   type CandidateExam,
   type RawExamObject,
-  type RawPopulatedQuestion,
 } from "./attempt.service.js";
 
-function makeQuestion(
-  overrides: Partial<RawPopulatedQuestion> = {}
-): RawPopulatedQuestion {
+/** Build a question item as stored inside an exam question group. */
+function makeGroupQuestion(overrides: Record<string, unknown> = {}) {
   return {
     _id: new mongoose.Types.ObjectId(),
-    skill: "listening",
-    type: "form_completion",
-    part: 1,
+    questionNumber: 1,
     prompt: "Write the answer.",
-    data: {},
     acceptedAnswers: ["secret-answer"],
     points: 1,
     explanation: "secret-explanation",
-    mediaIds: [],
+    mediaIds: [] as unknown[],
     ...overrides,
+  };
+}
+
+/** Build a single question group wrapping one (or more) group questions. */
+function makeGroup(overrides: Record<string, unknown> = {}) {
+  const { questions, ...rest } = overrides;
+  return {
+    _id: new mongoose.Types.ObjectId(),
+    groupType: "form_completion",
+    instructions: "",
+    config: {},
+    questions: (questions as unknown[] | undefined) ?? [makeGroupQuestion()],
+    ...rest,
   };
 }
 
@@ -73,7 +81,7 @@ describe("buildCandidateExam", () => {
           instructions: "Answer questions 1-10.",
           passageText: undefined,
           mediaIds: [new mongoose.Types.ObjectId()],
-          questionIds: [makeQuestion({ points: 2 })],
+          questionGroups: [makeGroup({ questions: [makeGroupQuestion({ points: 2 })] })],
         },
       ],
     }),
@@ -91,13 +99,12 @@ describe("buildCandidateExam", () => {
 
   it("keeps the candidate-facing question fields", () => {
     const candidate = buildCandidateExam(examStub);
-    const question = candidate.sections[0].questions[0];
+    const question = candidate.sections[0].questionGroups[0].questions[0];
 
     expect(candidate.title).toBe("IELTS Mock 01");
     expect(candidate.sections[0].skill).toBe("listening");
     expect(question.prompt).toBe("Write the answer.");
     expect(question.points).toBe(2);
-    expect(question.content).toBeNull();
   });
 
   it("populates media URLs for section and question media", () => {
@@ -126,7 +133,9 @@ describe("buildCandidateExam", () => {
             instructions: "Listen",
             passageText: null,
             mediaIds: [sectionMediaDoc],
-            questionIds: [makeQuestion({ mediaIds: [questionMediaDoc] })],
+            questionGroups: [
+              makeGroup({ questions: [makeGroupQuestion({ mediaIds: [questionMediaDoc] })] }),
+            ],
           },
         ],
       }),
@@ -136,36 +145,103 @@ describe("buildCandidateExam", () => {
     expect(candidate.sections[0].media).toHaveLength(1);
     expect(candidate.sections[0].media[0].url).toContain("audio/test.mp3");
     expect(candidate.sections[0].media[0].type).toBe("audio");
-    expect(candidate.sections[0].questions[0].media).toHaveLength(1);
-    expect(candidate.sections[0].questions[0].media[0].url).toContain("images/diagram.png");
-    expect(candidate.sections[0].questions[0].media[0].type).toBe("image");
+    expect(candidate.sections[0].questionGroups[0].questions[0].media).toHaveLength(1);
+    expect(candidate.sections[0].questionGroups[0].questions[0].media[0].url).toContain(
+      "images/diagram.png"
+    );
+    expect(candidate.sections[0].questionGroups[0].questions[0].media[0].type).toBe("image");
+  });
+
+  it("resolves a group-level image (config.imageMediaId) from the media url map", () => {
+    const groupImageId = new mongoose.Types.ObjectId().toString();
+    const examWithGroupImage = {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Group image exam",
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            title: "Passage 1",
+            instructions: "Look at the diagram",
+            mediaIds: [],
+            questionGroups: [
+              makeGroup({
+                groupType: "diagram_labelling",
+                config: { imageMediaId: groupImageId },
+              }),
+            ],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+
+    const urlMap = new Map([[groupImageId, "https://media.local/diagram.png"]]);
+    const candidate = buildCandidateExam(examWithGroupImage, urlMap);
+    const group = candidate.sections[0].questionGroups[0];
+
+    expect(group.media).toHaveLength(1);
+    expect(group.media[0]).toMatchObject({
+      id: groupImageId,
+      url: "https://media.local/diagram.png",
+      type: "image",
+    });
+    // Raw id stays in config for the editor round-trip.
+    expect(group.config.imageMediaId).toBe(groupImageId);
+  });
+
+  it("skips group-level images that cannot be resolved", () => {
+    const examWithGroupImage = {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Group image exam",
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            title: "Passage 1",
+            mediaIds: [],
+            questionGroups: [makeGroup({ config: { imageMediaId: "not-an-object-id" } })],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+
+    const candidate = buildCandidateExam(examWithGroupImage);
+    expect(candidate.sections[0].questionGroups[0].media).toEqual([]);
   });
 });
 
-describe("gradeQuestions", () => {
-  const matchedId = new mongoose.Types.ObjectId();
-  const missedId = new mongoose.Types.ObjectId();
+describe("collectExamMediaIds", () => {
+  function examWithGroupConfig(config: Record<string, unknown>): IExam {
+    return {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Collect",
+        sections: [
+          {
+            skill: "listening",
+            part: 2,
+            title: "Part 2",
+            mediaIds: [],
+            questionGroups: [makeGroup({ config })],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+  }
 
-  const answers: Pick<IAttemptAnswer, "questionId" | "value">[] = [
-    { questionId: matchedId, value: "  LONDON " },
-    { questionId: missedId, value: "Paris" },
-  ];
+  it("includes group-level config.imageMediaId references", () => {
+    const groupImageId = new mongoose.Types.ObjectId().toString();
 
-  it("respects per-question points and normalizes answers", () => {
-    const rawScore = gradeQuestions(answers, [
-      { _id: matchedId, acceptedAnswers: ["london"], points: 2 },
-      { _id: missedId, acceptedAnswers: ["Berlin"], points: 3 },
-    ]);
-
-    expect(rawScore).toBe(2);
+    expect(collectExamMediaIds(examWithGroupConfig({ imageMediaId: groupImageId }))).toContain(
+      groupImageId
+    );
   });
 
-  it("does not score unanswered questions", () => {
-    const rawScore = gradeQuestions([], [
-      { _id: matchedId, acceptedAnswers: ["london"], points: 1 },
-    ]);
-
-    expect(rawScore).toBe(0);
+  it("ignores malformed config.imageMediaId values", () => {
+    expect(collectExamMediaIds(examWithGroupConfig({ imageMediaId: "abc" }))).toEqual([]);
+    expect(collectExamMediaIds(examWithGroupConfig({ imageMediaId: 42 }))).toEqual([]);
   });
 });
 
@@ -179,7 +255,7 @@ describe("collectExamQuestionBuckets", () => {
           skill: "writing",
           part: 1,
           title: "Task 1",
-          questionIds: [makeQuestion({ skill: "writing", type: "writing_task_1" })],
+          questionGroups: [makeGroup({ groupType: "writing_task_1" })],
         },
       ],
     };
@@ -189,8 +265,8 @@ describe("collectExamQuestionBuckets", () => {
     expect(buckets.hasWriting).toBe(true);
     expect(buckets.hasListening).toBe(false);
     expect(buckets.hasReading).toBe(false);
-    expect(buckets.listening).toHaveLength(0);
-    expect(buckets.reading).toHaveLength(0);
+    expect(buckets.listeningGrouped).toHaveLength(0);
+    expect(buckets.readingGrouped).toHaveLength(0);
   });
 
   it("separates listening and reading questions", () => {
@@ -202,13 +278,13 @@ describe("collectExamQuestionBuckets", () => {
           skill: "listening",
           part: 1,
           title: "L1",
-          questionIds: [makeQuestion({ skill: "listening" })],
+          questionGroups: [makeGroup()],
         },
         {
           skill: "reading",
           part: 1,
           title: "R1",
-          questionIds: [makeQuestion({ skill: "reading" })],
+          questionGroups: [makeGroup()],
         },
       ],
     };
@@ -218,8 +294,8 @@ describe("collectExamQuestionBuckets", () => {
     expect(buckets.hasListening).toBe(true);
     expect(buckets.hasReading).toBe(true);
     expect(buckets.hasWriting).toBe(false);
-    expect(buckets.listening).toHaveLength(1);
-    expect(buckets.reading).toHaveLength(1);
+    expect(buckets.listeningGrouped).toHaveLength(1);
+    expect(buckets.readingGrouped).toHaveLength(1);
   });
 });
 
@@ -258,9 +334,7 @@ describe("getAttemptResult permissions", () => {
 
   it("throws NotFoundError when attempt does not exist", async () => {
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(null),
-      }),
+      populate: vi.fn().mockResolvedValue(null),
     } as never);
 
     await expect(
@@ -275,9 +349,7 @@ describe("getAttemptResult permissions", () => {
       status: "submitted",
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
 
     await expect(
@@ -294,9 +366,7 @@ describe("getAttemptResult permissions", () => {
       assignmentId: null,
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
 
     await expect(
@@ -313,9 +383,7 @@ describe("getAttemptResult permissions", () => {
       assignmentId: null,
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
 
     await expect(
@@ -332,9 +400,7 @@ describe("getAttemptResult permissions", () => {
       assignmentId: null,
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
 
     await expect(
@@ -422,14 +488,12 @@ describe("auto-finalize when expired", () => {
     };
     vi.spyOn(AttemptModel, "findById").mockResolvedValue(mockAttempt as never);
     vi.spyOn(ExamModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({
+      populate: vi.fn().mockResolvedValue({
           toObject: () => ({
             _id: examId,
             sections: [],
           }),
         }),
-      }),
     } as never);
     vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: attemptId,
@@ -457,14 +521,12 @@ describe("auto-finalize when expired", () => {
     };
     vi.spyOn(AttemptModel, "findById").mockResolvedValue(mockAttempt as never);
     vi.spyOn(ExamModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({
+      populate: vi.fn().mockResolvedValue({
           toObject: () => ({
             _id: examId,
             sections: [],
           }),
         }),
-      }),
     } as never);
     vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: attemptId,
@@ -476,96 +538,6 @@ describe("auto-finalize when expired", () => {
     const result = await getAttemptForRecovery(attemptId, studentId);
     expect(result.status).toBe("expired");
     expect(result.remainingSeconds).toBe(0);
-  });
-});
-
-describe("mixed legacy + questionGroups grading (logic fix)", () => {
-  const studentId = new mongoose.Types.ObjectId().toString();
-  const examId = new mongoose.Types.ObjectId().toString();
-  const attemptId = new mongoose.Types.ObjectId().toString();
-
-  it("grades BOTH buckets: legacy sections are not zeroed when another section uses groups", async () => {
-    const legacyQuestion = makeQuestion({
-      skill: "listening",
-      acceptedAnswers: ["secret-answer"],
-      points: 1,
-    });
-    const groupQuestionId = new mongoose.Types.ObjectId();
-
-    // Mixed exam: listening section in legacy `questionIds` format + reading
-    // section in the new embedded `questionGroups` format.
-    const examObj = {
-      _id: examId,
-      title: "Mixed format exam",
-      sections: [
-        {
-          skill: "listening",
-          part: 1,
-          title: "Legacy L1",
-          questionIds: [legacyQuestion],
-          questionGroups: [],
-        },
-        {
-          skill: "reading",
-          part: 1,
-          title: "Grouped R1",
-          questionIds: [],
-          questionGroups: [
-            {
-              _id: new mongoose.Types.ObjectId(),
-              groupType: "summary_completion",
-              config: {},
-              questions: [
-                {
-                  _id: groupQuestionId,
-                  questionNumber: 1,
-                  prompt: "Grouped question",
-                  acceptedAnswers: ["group-answer"],
-                  points: 1,
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    };
-
-    const mockAttempt = {
-      _id: attemptId,
-      studentId,
-      examId,
-      status: "in_progress",
-      expiresAt: new Date(Date.now() + 60_000),
-      answers: [
-        { questionId: legacyQuestion._id, value: "secret-answer" },
-        { questionId: groupQuestionId, value: "group-answer" },
-      ],
-      scores: {},
-      save: vi.fn(),
-    };
-
-    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce(mockAttempt as never);
-    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({ toObject: () => examObj }),
-      }),
-    } as never);
-    const updateSpy = vi.spyOn(AttemptModel, "findOneAndUpdate").mockResolvedValueOnce({
-      _id: attemptId,
-      status: "submitted",
-      submittedAt: new Date(),
-      scores: {},
-    } as never);
-
-    const result = await submitAttempt(attemptId, studentId);
-
-    expect(result.status).toBe("submitted");
-    const updateArg = updateSpy.mock.calls[0][1] as {
-      $set: { scores: { listeningRaw?: number; readingRaw?: number } };
-    };
-    // Both correct answers must count: 1 legacy listening + 1 grouped reading.
-    expect(updateArg.$set.scores.listeningRaw).toBe(1);
-    expect(updateArg.$set.scores.readingRaw).toBe(1);
   });
 });
 
@@ -595,11 +567,9 @@ describe("BUG-03 assignment requirement flag", () => {
       status: "published",
     } as never);
     vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({
+      populate: vi.fn().mockResolvedValue({
           toObject: () => ({ _id: examId, title: "T", sections: [] }),
         }),
-      }),
     } as never);
     vi.spyOn(AttemptModel, "findOne").mockResolvedValueOnce({
       _id: new mongoose.Types.ObjectId(examId),
@@ -630,16 +600,12 @@ describe("BUG-05 expired attempt result", () => {
       scores: { overallBand: 6 },
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
     vi.spyOn(ExamModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({
+      populate: vi.fn().mockResolvedValue({
           toObject: () => ({ _id: examId, title: "T", sections: [] }),
         }),
-      }),
     } as never);
     vi.spyOn(WritingReviewModel, "findOne").mockResolvedValueOnce(null);
 
@@ -664,16 +630,12 @@ describe("BUG-05 expired attempt result", () => {
       scores: { overallBand: 7 },
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
     vi.spyOn(ExamModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue({
+      populate: vi.fn().mockResolvedValue({
           toObject: () => ({ _id: examId, title: "T", sections: [] }),
         }),
-      }),
     } as never);
     vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
 
@@ -704,11 +666,9 @@ describe("startAttempt assignment preference (FIX-12)", () => {
         durationMinutes: 60,
       } as never)
       .mockReturnValueOnce({
-        populate: vi.fn().mockReturnValue({
-          populate: vi.fn().mockResolvedValue({
+        populate: vi.fn().mockResolvedValue({
             toObject: () => ({ _id: examId, title: "T", durationMinutes: 60, sections: [] }),
           }),
-        }),
       } as never);
   }
 
@@ -800,10 +760,18 @@ describe("question shuffle helpers", () => {
           passageText: null,
           mediaIds: [],
           media: [],
-          questions: [
-            { id: "q1", prompt: "1", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
-            { id: "q2", prompt: "2", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
-            { id: "q3", prompt: "3", type: "t", part: 1, points: 1, content: null, data: {}, mediaIds: [], media: [] },
+          questionGroups: [
+            {
+              id: "g1",
+              groupType: "summary_completion",
+              instructions: "",
+              config: {},
+              questions: [
+                { id: "q1", questionNumber: 1, prompt: "1", points: 1, mediaIds: [], media: [] },
+                { id: "q2", questionNumber: 2, prompt: "2", points: 1, mediaIds: [], media: [] },
+                { id: "q3", questionNumber: 3, prompt: "3", points: 1, mediaIds: [], media: [] },
+              ],
+            },
           ],
         },
       ],
@@ -812,11 +780,9 @@ describe("question shuffle helpers", () => {
     expect(collectCandidateQuestionIds(exam)).toEqual(["q1", "q2", "q3"]);
 
     const reordered = applyQuestionOrder(exam, ["q3", "q1", "q2"]);
-    expect(reordered.sections[0].questions.map((question) => question.id)).toEqual([
-      "q3",
-      "q1",
-      "q2",
-    ]);
+    expect(
+      reordered.sections[0].questionGroups[0].questions.map((question) => question.id)
+    ).toEqual(["q3", "q1", "q2"]);
     expect(applyQuestionOrder(exam, [])).toBe(exam);
   });
 
@@ -887,7 +853,6 @@ describe("buildCandidateExam question-group safety (FIX-18)", () => {
             instructions: "Do this",
             passageText: null,
             mediaIds: [],
-            questionIds: [],
             questionGroups: [
               {
                 _id: new mongoose.Types.ObjectId(),

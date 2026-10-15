@@ -18,36 +18,40 @@ describe("getExamAnalytics", () => {
   const q2 = new mongoose.Types.ObjectId();
 
   function mockExam(createdBy: mongoose.Types.ObjectId = teacherId) {
-    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
-      populate: vi.fn().mockResolvedValue({
-        _id: examId,
-        title: "Mock",
-        status: "published",
-        createdBy,
-        sections: [
-          {
-            skill: "listening",
-            part: 1,
-            title: "S1",
-            questionIds: [
-              {
-                _id: q1,
-                skill: "listening",
-                part: 1,
-                prompt: "Q1",
-                acceptedAnswers: ["london"],
-              },
-              {
-                _id: q2,
-                skill: "listening",
-                part: 1,
-                prompt: "Q2",
-                acceptedAnswers: ["paris"],
-              },
-            ],
-          },
-        ],
-      }),
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      title: "Mock",
+      status: "published",
+      createdBy,
+      sections: [
+        {
+          skill: "listening",
+          part: 1,
+          title: "S1",
+          questionGroups: [
+            {
+              groupType: "form_completion",
+              config: {},
+              questions: [
+                {
+                  _id: q1,
+                  questionNumber: 1,
+                  prompt: "Q1",
+                  acceptedAnswers: ["london"],
+                  points: 1,
+                },
+                {
+                  _id: q2,
+                  questionNumber: 2,
+                  prompt: "Q2",
+                  acceptedAnswers: ["paris"],
+                  points: 1,
+                },
+              ],
+            },
+          ],
+        },
+      ],
     } as never);
   }
 

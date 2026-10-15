@@ -207,44 +207,43 @@ async function main(): Promise<void> {
   });
   logStep(`Tạo lớp ${cls.code} và thêm học sinh`);
 
-  const listeningQuestion = await request<QuestionSummary>("/api/questions", {
+  await request<QuestionSummary>("/api/questions", {
     method: "POST",
     token: teacherAuth.accessToken,
     body: {
       skill: "listening",
-      type: "form_completion",
       part: 1,
-      prompt: `Smoke listening question ${suffix}: City: [1]`,
-      data: { templateText: "City: [1]" },
-      acceptedAnswers: ["london"],
-      points: 1,
+      groupType: "form_completion",
+      instructions: `Smoke listening ${suffix}: complete the note.`,
+      config: { maxWords: 1, allowNumbers: true, template: "City: [1]" },
+      questions: [{ prompt: "City: [1]", acceptedAnswers: ["london"], points: 1 }],
     },
   });
-  const writingTask1 = await request<QuestionSummary>("/api/questions", {
+  await request<QuestionSummary>("/api/questions", {
     method: "POST",
     token: teacherAuth.accessToken,
     body: {
       skill: "writing",
-      type: "writing_task_1",
       part: 1,
-      prompt: `Smoke writing task 1 ${suffix}`,
-      acceptedAnswers: [],
-      points: 1,
+      groupType: "writing_task_1",
+      instructions: "You should spend about 20 minutes on this task.",
+      config: { minWords: 150 },
+      questions: [{ prompt: `Smoke writing task 1 ${suffix}`, acceptedAnswers: [], points: 1 }],
     },
   });
-  const writingTask2 = await request<QuestionSummary>("/api/questions", {
+  await request<QuestionSummary>("/api/questions", {
     method: "POST",
     token: teacherAuth.accessToken,
     body: {
       skill: "writing",
-      type: "writing_task_2",
       part: 2,
-      prompt: `Smoke writing task 2 ${suffix}`,
-      acceptedAnswers: [],
-      points: 1,
+      groupType: "writing_task_2",
+      instructions: "You should spend about 40 minutes on this task.",
+      config: { minWords: 250 },
+      questions: [{ prompt: `Smoke writing task 2 ${suffix}`, acceptedAnswers: [], points: 1 }],
     },
   });
-  logStep("Tạo 3 câu hỏi (listening + 2 writing)");
+  logStep("Tạo 3 nhóm câu hỏi (listening + 2 writing)");
 
   const exam = await request<ExamSummary>("/api/exams", {
     method: "POST",
@@ -258,19 +257,46 @@ async function main(): Promise<void> {
           skill: "listening",
           part: 1,
           title: "Listening Part 1",
-          questionIds: [listeningQuestion.id],
+          questionGroups: [
+            {
+              groupType: "form_completion",
+              instructions: "Complete the note.",
+              config: { maxWords: 1, allowNumbers: true, template: "City: [1]" },
+              questions: [
+                { questionNumber: 1, prompt: "City: [1]", acceptedAnswers: ["london"], points: 1 },
+              ],
+            },
+          ],
         },
         {
           skill: "writing",
           part: 1,
           title: "Writing Task 1",
-          questionIds: [writingTask1.id],
+          questionGroups: [
+            {
+              groupType: "writing_task_1",
+              instructions: "Write at least 150 words.",
+              config: { minWords: 150 },
+              questions: [
+                { questionNumber: 1, prompt: `Smoke writing task 1 ${suffix}`, acceptedAnswers: [], points: 1 },
+              ],
+            },
+          ],
         },
         {
           skill: "writing",
           part: 2,
           title: "Writing Task 2",
-          questionIds: [writingTask2.id],
+          questionGroups: [
+            {
+              groupType: "writing_task_2",
+              instructions: "Write at least 250 words.",
+              config: { minWords: 250 },
+              questions: [
+                { questionNumber: 1, prompt: `Smoke writing task 2 ${suffix}`, acceptedAnswers: [], points: 1 },
+              ],
+            },
+          ],
         },
       ],
     },
@@ -281,11 +307,21 @@ async function main(): Promise<void> {
   });
   logStep("Tạo đề thi và publish");
 
-  const studentExamView = await request<{ id: string; sections: unknown[] }>(
-    `/api/exams/${exam.id}`,
-    { token: studentAuth.accessToken }
-  );
+  const studentExamView = await request<{
+    id: string;
+    sections: Array<{
+      skill: string;
+      questionGroups: Array<{ questions: Array<{ id: string }> }>;
+    }>;
+  }>(`/api/exams/${exam.id}`, { token: studentAuth.accessToken });
   const studentExamViewJson = JSON.stringify(studentExamView);
+
+  const listeningQuestionId =
+    studentExamView.sections.find((s) => s.skill === "listening")?.questionGroups[0]
+      ?.questions[0]?.id ?? "";
+  const writingQuestionIds = studentExamView.sections
+    .filter((s) => s.skill === "writing")
+    .map((s) => s.questionGroups[0]?.questions[0]?.id ?? "");
   assert(
     !studentExamViewJson.includes("acceptedAnswers") &&
       !studentExamViewJson.includes("explanation"),
@@ -347,9 +383,9 @@ async function main(): Promise<void> {
     token: studentAuth.accessToken,
     body: {
       answers: [
-        { questionId: listeningQuestion.id, value: "London" },
-        { questionId: writingTask1.id, value: task1Content },
-        { questionId: writingTask2.id, value: task2Content },
+        { questionId: listeningQuestionId, value: "London" },
+        { questionId: writingQuestionIds[0], value: task1Content },
+        { questionId: writingQuestionIds[1], value: task2Content },
       ],
     },
   });

@@ -2,43 +2,53 @@ import { z } from "zod";
 
 const SkillEnum = z.enum(["listening", "reading", "writing"]);
 
+/** One answer slot inside a bank Question Group. */
+const BankQuestionItemSchema = z.object({
+  prompt: z.string().default(""),
+  acceptedAnswers: z.array(z.string()).default([]),
+  points: z.number().int("Điểm phải là số nguyên").min(1).max(10).default(1),
+  explanation: z.string().optional(),
+  mediaIds: z.array(z.string()).default([]),
+});
+
+/**
+ * The Question Bank stores Question *Groups* (same shape embedded in an exam
+ * section). A group always has a `groupType`, shared `instructions` + `config`,
+ * and at least one question.
+ */
 export const CreateQuestionSchema = z.object({
   body: z.object({
     skill: SkillEnum,
-    type: z.string().min(1, "Loại câu hỏi không hợp lệ"),
     part: z.number().int().min(1).max(4),
-    prompt: z.string().min(1, "Nội dung câu hỏi không được để trống"),
-    content: z.string().optional(),
-    data: z.record(z.string(), z.any()).default({}),
-    acceptedAnswers: z.array(z.string()).default([]),
-    points: z.number().int("Điểm phải là số nguyên").min(1).max(10).default(1),
-    explanation: z.string().optional(),
-    mediaIds: z.array(z.string()).default([]),
+    groupType: z.string().min(1, "Dạng câu hỏi không hợp lệ"),
+    instructions: z.string().default(""),
+    config: z.record(z.string(), z.any()).default({}),
+    questions: z.array(BankQuestionItemSchema).min(1, "Nhóm câu hỏi phải có ít nhất 1 câu"),
   }),
 });
 
 /**
- * Update body MUST be a genuine partial schema without Zod `.default()` injection.
- * In Zod v4, `.partial()` leaves inner `.default()` values in place, so
- * `CreateQuestionSchema.shape.body.partial()` would inject `acceptedAnswers: []`,
- * `mediaIds: []`, `data: {}` and `points: 1` into every PUT, wiping the stored
- * answer key / media / metadata whenever a caller updates just the prompt.
+ * Update body MUST be a genuine partial schema without Zod `.default()` injection
+ * at the top level. In Zod v4, `.partial()` leaves inner `.default()` values in
+ * place, so `CreateQuestionSchema.shape.body.partial()` would inject
+ * `instructions: ""` / `config: {}` into every PUT, wiping stored data whenever a
+ * caller updates only part of a group. Fields are therefore declared optional
+ * explicitly here.
+ *
+ * (Item-level defaults on `questions` are fine: sending `questions` replaces the
+ * whole array anyway.)
  */
 export const UpdateQuestionSchema = z.object({
   params: z.object({
-    id: z.string().min(1, "Thiếu ID câu hỏi"),
+    id: z.string().min(1, "Thiếu ID nhóm câu hỏi"),
   }),
   body: z.object({
     skill: SkillEnum.optional(),
-    type: z.string().min(1, "Loại câu hỏi không hợp lệ").optional(),
     part: z.number().int().min(1).max(4).optional(),
-    prompt: z.string().min(1, "Nội dung câu hỏi không được để trống").optional(),
-    content: z.string().optional(),
-    data: z.record(z.string(), z.any()).optional(),
-    acceptedAnswers: z.array(z.string()).optional(),
-    points: z.number().int("Điểm phải là số nguyên").min(1).max(10).optional(),
-    explanation: z.string().optional(),
-    mediaIds: z.array(z.string()).optional(),
+    groupType: z.string().min(1, "Dạng câu hỏi không hợp lệ").optional(),
+    instructions: z.string().optional(),
+    config: z.record(z.string(), z.any()).optional(),
+    questions: z.array(BankQuestionItemSchema).min(1, "Nhóm câu hỏi phải có ít nhất 1 câu").optional(),
   }),
 });
 
@@ -46,6 +56,7 @@ export const ListQuestionsSchema = z.object({
   query: z.object({
     skill: SkillEnum.optional(),
     part: z.coerce.number().int().min(1).max(4).optional(),
+    /** Matches the group's `groupType`. */
     type: z.string().optional(),
     createdBy: z.string().optional(),
     scope: z.enum(["own", "all"]).optional(),

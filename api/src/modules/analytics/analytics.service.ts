@@ -20,20 +20,10 @@ import type {
   StudentProgressPoint,
 } from "./analytics.model.js";
 
-interface PopulatedAnalyticsQuestion {
-  _id: Types.ObjectId;
-  skill?: SkillType;
-  type?: string;
-  part?: number;
-  prompt?: string;
-  acceptedAnswers?: string[];
-}
-
 interface PopulatedAnalyticsSection {
   skill: SkillType;
   part: number;
   title: string;
-  questionIds?: unknown[];
   questionGroups?: Array<{
     groupType?: string;
     questions?: Array<{
@@ -53,10 +43,6 @@ interface AnalyticsAttempt {
 export interface StudentProgressQuery {
   studentId?: string;
   limit?: number;
-}
-
-function isPopulatedQuestion(value: unknown): value is PopulatedAnalyticsQuestion {
-  return typeof value === "object" && value !== null && "_id" in value;
 }
 
 function roundToOneDecimal(value: number): number {
@@ -82,7 +68,7 @@ export async function getExamAnalytics(
   userId: string,
   role: string
 ): Promise<ExamAnalytics> {
-  const exam = await ExamModel.findById(examId).populate("sections.questionIds");
+  const exam = await ExamModel.findById(examId);
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
@@ -121,28 +107,14 @@ export async function getExamAnalytics(
         acceptedAnswers: string[];
       }> = [];
 
-      if (Array.isArray(section.questionGroups) && section.questionGroups.length > 0) {
-        for (const group of section.questionGroups) {
-          for (const q of group.questions ?? []) {
-            itemsToProcess.push({
-              _id: q._id,
-              prompt: q.prompt,
-              skill: section.skill,
-              part: section.part,
-              acceptedAnswers: q.acceptedAnswers ?? [],
-            });
-          }
-        }
-      } else {
-        for (const item of section.questionIds ?? []) {
-          if (!isPopulatedQuestion(item)) continue;
-          const question = item as PopulatedAnalyticsQuestion;
+      for (const group of section.questionGroups ?? []) {
+        for (const q of group.questions ?? []) {
           itemsToProcess.push({
-            _id: question._id,
-            prompt: question.prompt,
-            skill: question.skill ?? section.skill,
-            part: question.part ?? section.part,
-            acceptedAnswers: question.acceptedAnswers ?? [],
+            _id: q._id,
+            prompt: q.prompt,
+            skill: section.skill,
+            part: section.part,
+            acceptedAnswers: q.acceptedAnswers ?? [],
           });
         }
       }

@@ -5,6 +5,7 @@ import { AssignmentModel } from "../assignments/assignment.model.js";
 import {
   buildCandidateExam,
   examMediaPresignTtl,
+  getGroupConfigImageId,
   presignMediaMap,
   shouldEnforceWordLimit,
   toCandidateMediaItem,
@@ -14,7 +15,6 @@ import {
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
-import { mapLegacyTypeToGroupType } from "../../config/constants.js";
 import {
   ExamModel,
   type ExamStatus,
@@ -48,23 +48,6 @@ export interface ExamListItem {
   createdAt: Date;
 }
 
-export interface SerializedQuestion {
-  id: string;
-  skill: SkillType;
-  type: string;
-  part: number;
-  prompt: string;
-  content: string | null;
-  data: Record<string, unknown>;
-  acceptedAnswers: string[];
-  points: number;
-  explanation: string | null;
-  mediaIds: string[];
-  createdBy: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
 export interface SerializedQuestionItem {
   id: string;
   questionNumber: number;
@@ -80,6 +63,8 @@ export interface SerializedQuestionGroup {
   groupType: QuestionGroupType;
   instructions: string;
   config: Record<string, unknown>;
+  /** Resolved group-level image (config.imageMediaId) with a presigned URL. */
+  media: CandidateMediaItem[];
   questions: SerializedQuestionItem[];
 }
 
@@ -94,10 +79,6 @@ export interface ExamSectionDetail {
   mediaIds: string[];
   media: CandidateMediaItem[];
   questionGroups: SerializedQuestionGroup[];
-  /** @deprecated Legacy field. Empty when using questionGroups. */
-  questionIds: string[];
-  /** @deprecated Legacy field. Empty when using questionGroups. */
-  questions: SerializedQuestion[];
 }
 
 export interface ExamDetail {
@@ -126,23 +107,6 @@ interface ExamFilter {
   status?: ExamStatus;
   createdBy?: string;
   _id?: { $in: Types.ObjectId[] };
-}
-
-interface PopulatedQuestion {
-  _id: Types.ObjectId;
-  skill: SkillType;
-  type: string;
-  part: number;
-  prompt: string;
-  content?: string;
-  data: Record<string, unknown>;
-  acceptedAnswers: string[];
-  points: number;
-  explanation?: string;
-  mediaIds: Types.ObjectId[];
-  createdBy: Types.ObjectId;
-  createdAt: Date;
-  updatedAt: Date;
 }
 
 export function getDefaultSectionTitle(skill: SkillType, part: number): string {
@@ -209,9 +173,6 @@ export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
     const mediaIds = (section.mediaIds ?? [])
       .map(toSafeObjectId)
       .filter((mediaId): mediaId is Types.ObjectId => mediaId !== undefined);
-    const questionIds = (section.questionIds ?? [])
-      .map(toSafeObjectId)
-      .filter((questionId): questionId is Types.ObjectId => questionId !== undefined);
 
     return {
       ...(safeId ? { _id: safeId } : {}),
@@ -223,28 +184,8 @@ export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
       transcript: section.transcript ?? undefined,
       mediaIds,
       questionGroups: (section.questionGroups ?? []).map(mapQuestionGroupInput) as IQuestionGroup[],
-      questionIds,
     } as IExamSection;
   });
-}
-
-export function serializeQuestion(question: PopulatedQuestion): SerializedQuestion {
-  return {
-    id: question._id?.toString() ?? "",
-    skill: question.skill,
-    type: question.type,
-    part: question.part,
-    prompt: question.prompt,
-    content: question.content ?? null,
-    data: question.data,
-    acceptedAnswers: question.acceptedAnswers,
-    points: question.points,
-    explanation: question.explanation ?? null,
-    mediaIds: (question.mediaIds ?? []).map((mediaId) => mediaId?.toString() ?? "").filter(Boolean),
-    createdBy: question.createdBy?.toString() ?? "",
-    createdAt: question.createdAt,
-    updatedAt: question.updatedAt,
-  };
 }
 
 function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
@@ -259,12 +200,25 @@ function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
   };
 }
 
-function serializeQuestionGroup(group: IQuestionGroup): SerializedQuestionGroup {
+function serializeQuestionGroup(
+  group: IQuestionGroup,
+  mediaUrlMap?: Map<string, string>
+): SerializedQuestionGroup {
+  // Group-level image (config.imageMediaId) — resolve the presigned URL for the
+  // teacher UI (preview/editor thumbnail). The raw id stays in `config`.
+  const imageId = getGroupConfigImageId(group);
+  const imageUrl = imageId ? mediaUrlMap?.get(imageId) : undefined;
+  const media: CandidateMediaItem[] =
+    imageId && imageUrl
+      ? [{ id: imageId, url: imageUrl, type: "image", originalName: "" }]
+      : [];
+
   return {
     id: group._id?.toString() ?? "",
     groupType: group.groupType,
     instructions: group.instructions ?? "",
     config: group.config ?? {},
+    media,
     questions: (group.questions ?? []).map(serializeQuestionItem),
   };
 }
@@ -377,7 +331,6 @@ export async function getById(
 ): Promise<ExamDetail | StudentExamDetail> {
   const exam = await ExamModel.findById(id).populate([
     { path: "sections.mediaIds", model: "Media" },
-    "sections.questionIds",
   ]);
 
   if (!exam) {
@@ -406,34 +359,10 @@ export async function getById(
   }
 
   const sections: ExamSectionDetail[] = exam.sections.map((section) => {
-    const usesGroups = sectionUsesGroups(section);
     const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId).filter(Boolean);
     const sectionMedia = (section.mediaIds ?? [])
       .map((item) => toCandidateMediaItem(item, mediaUrlMap))
       .filter((media): media is CandidateMediaItem => media !== null);
-
-    if (usesGroups) {
-      return {
-        id: section._id?.toString() ?? "",
-        skill: section.skill,
-        part: section.part,
-        title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
-        instructions: section.instructions ?? null,
-        passageText: section.passageText ?? null,
-        transcript: section.transcript ?? null,
-        mediaIds: sectionMediaIds,
-        media: sectionMedia,
-        questionGroups: (section.questionGroups ?? []).map(serializeQuestionGroup),
-        questionIds: [],
-        questions: [],
-      };
-    }
-
-    // Legacy path: questionIds populated
-    const rawQuestions = section.questionIds as unknown as (PopulatedQuestion | null)[] | undefined;
-    const questions = (rawQuestions ?? [])
-      .filter((question): question is PopulatedQuestion => question !== null)
-      .map(serializeQuestion);
 
     return {
       id: section._id?.toString() ?? "",
@@ -445,9 +374,9 @@ export async function getById(
       transcript: section.transcript ?? null,
       mediaIds: sectionMediaIds,
       media: sectionMedia,
-      questionGroups: [],
-      questionIds: questions.map((question) => question.id),
-      questions,
+      questionGroups: (section.questionGroups ?? []).map((group) =>
+        serializeQuestionGroup(group, mediaUrlMap)
+      ),
     };
   });
 
@@ -544,7 +473,6 @@ export async function clone(
       transcript: section.transcript,
       mediaIds: section.mediaIds,
       questionGroups: section.questionGroups,
-      questionIds: section.questionIds,
     })),
     status: "draft",
     openAt: original.openAt,
@@ -555,16 +483,12 @@ export async function clone(
   return { id: cloned._id.toString(), title: cloned.title, status: cloned.status };
 }
 
-/** Count total questions across all sections, supporting both formats */
+/** Count total questions across all sections. */
 function countExamQuestions(exam: IExam): number {
   let count = 0;
   for (const section of exam.sections) {
-    if (sectionUsesGroups(section)) {
-      for (const group of section.questionGroups) {
-        count += group.questions.length;
-      }
-    } else {
-      count += (section.questionIds ?? []).length;
+    for (const group of section.questionGroups) {
+      count += group.questions.length;
     }
   }
   return count;
@@ -636,29 +560,14 @@ export async function publish(
   }
 
   // FIX-08/M-03: listening/reading must total 40 points (writing is band-scored).
-  await exam.populate("sections.questionIds");
-
   for (const section of exam.sections) {
     if (section.skill === "writing") continue;
 
     let sectionPoints = 0;
-
-    if (sectionUsesGroups(section)) {
-      for (const group of section.questionGroups) {
-        for (const q of group.questions) {
-          sectionPoints += q.points ?? 1;
-        }
+    for (const group of section.questionGroups) {
+      for (const q of group.questions) {
+        sectionPoints += q.points ?? 1;
       }
-    } else {
-      const rawQuestions = section.questionIds as unknown as
-        | (PopulatedQuestion | null)[]
-        | undefined;
-      sectionPoints = (rawQuestions ?? [])
-        .filter(
-          (q): q is PopulatedQuestion =>
-            q !== null && typeof q === "object" && "_id" in q
-        )
-        .reduce((sum, q) => sum + (q.points ?? 1), 0);
     }
 
     if (sectionPoints > 40) {
@@ -682,76 +591,6 @@ export async function publish(
   await exam.save();
 
   return { id: exam._id.toString(), status: exam.status };
-}
-
-export async function migrateExamToGroups(
-  id: string,
-  userId: string,
-  role: string
-): Promise<{ id: string; message: string; migratedSections: number }> {
-  const exam = await findOwnedExam(id, userId, role);
-  await exam.populate("sections.questionIds");
-
-  let migratedSections = 0;
-  // IELTS numbering is continuous per skill across sections (Listening 1–40, Reading 1–40...),
-  // matching the builder's global `numbering` map. Keep one counter per skill.
-  const skillCounters: Record<SkillType, number> = {
-    listening: 0,
-    reading: 0,
-    writing: 0,
-  };
-
-  for (const section of exam.sections) {
-    if (sectionUsesGroups(section)) continue;
-
-    const rawQuestions = section.questionIds as unknown as (PopulatedQuestion | null)[] | undefined;
-    const questions = (rawQuestions ?? []).filter(
-      (q): q is PopulatedQuestion => q !== null && typeof q === "object" && "_id" in q
-    );
-
-    if (questions.length === 0) continue;
-
-    const groups: IQuestionGroup[] = [];
-    let currentGroup: IQuestionGroup | null = null;
-
-    for (const q of questions) {
-      const groupType = mapLegacyTypeToGroupType(q.type) as QuestionGroupType;
-
-      if (!currentGroup || currentGroup.groupType !== groupType) {
-        currentGroup = {
-          _id: new mongoose.Types.ObjectId(),
-          groupType,
-          instructions: q.content || "",
-          config: (q.data as Record<string, unknown>) ?? {},
-          questions: [],
-        };
-        groups.push(currentGroup);
-      }
-
-      skillCounters[section.skill] += 1;
-
-      currentGroup.questions.push({
-        _id: new mongoose.Types.ObjectId(),
-        questionNumber: skillCounters[section.skill],
-        prompt: q.prompt,
-        acceptedAnswers: q.acceptedAnswers ?? [],
-        points: q.points ?? 1,
-        explanation: q.explanation,
-        mediaIds: q.mediaIds,
-      });
-    }
-
-    section.questionGroups = groups;
-    migratedSections++;
-  }
-
-  await exam.save();
-
-  return {
-    id: exam._id.toString(),
-    message: `Đã chuyển đổi ${migratedSections} phần thi sang cấu trúc nhóm câu hỏi.`,
-    migratedSections,
-  };
 }
 
 export async function unpublish(

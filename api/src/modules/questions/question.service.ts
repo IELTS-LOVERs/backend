@@ -1,22 +1,27 @@
-import mongoose, { type UpdateQuery } from "mongoose";
-import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import mongoose from "mongoose";
+import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { escapeRegExp } from "../../common/utils/escape-regexp.js";
-import { ExamModel } from "../exams/exam.model.js";
-import { QuestionModel, type IQuestion } from "./question.model.js";
+import { QuestionModel, type IBankQuestionItem, type IQuestion } from "./question.model.js";
 import type { CreateQuestionBody, ListQuestionsQuery, UpdateQuestionBody } from "./question.validation.js";
 
-export interface SerializedQuestion {
+export interface SerializedBankQuestionItem {
   id: string;
-  skill: IQuestion["skill"];
-  type: IQuestion["type"];
-  part: number;
   prompt: string;
-  content: string | null;
-  data: Record<string, unknown>;
   acceptedAnswers: string[];
   points: number;
   explanation: string | null;
   mediaIds: string[];
+}
+
+export interface SerializedBankQuestionGroup {
+  id: string;
+  skill: IQuestion["skill"];
+  part: number;
+  groupType: string;
+  instructions: string;
+  config: Record<string, unknown>;
+  questions: SerializedBankQuestionItem[];
+  questionCount: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -29,24 +34,37 @@ export interface ListQuestionsFilters extends ListQuestionsQuery {
 interface QuestionFilter {
   skill?: IQuestion["skill"];
   part?: number;
-  type?: IQuestion["type"];
+  groupType?: IQuestion["groupType"];
   createdBy?: string;
-  $or?: Array<{ prompt?: RegExp; content?: RegExp }>;
+  $or?: Array<Record<string, RegExp>>;
 }
 
-export function serializeQuestion(question: IQuestion): SerializedQuestion {
+function toObjectIds(ids: string[] = []): mongoose.Types.ObjectId[] {
+  return ids.map((id) => new mongoose.Types.ObjectId(id));
+}
+
+function serializeItem(item: IBankQuestionItem): SerializedBankQuestionItem {
+  return {
+    id: item._id.toString(),
+    prompt: item.prompt ?? "",
+    acceptedAnswers: item.acceptedAnswers ?? [],
+    points: item.points ?? 1,
+    explanation: item.explanation ?? null,
+    mediaIds: (item.mediaIds ?? []).map((id) => id.toString()),
+  };
+}
+
+export function serializeQuestion(question: IQuestion): SerializedBankQuestionGroup {
+  const questions = (question.questions ?? []).map(serializeItem);
   return {
     id: question._id.toString(),
     skill: question.skill,
-    type: question.type,
     part: question.part,
-    prompt: question.prompt,
-    content: question.content ?? null,
-    data: question.data,
-    acceptedAnswers: question.acceptedAnswers,
-    points: question.points,
-    explanation: question.explanation ?? null,
-    mediaIds: question.mediaIds.map((id) => id.toString()),
+    groupType: question.groupType,
+    instructions: question.instructions ?? "",
+    config: (question.config ?? {}) as Record<string, unknown>,
+    questions,
+    questionCount: questions.length,
     createdBy: question.createdBy.toString(),
     createdAt: question.createdAt,
     updatedAt: question.updatedAt,
@@ -68,11 +86,20 @@ export function assertOwner(
 export async function create(
   data: CreateQuestionBody,
   userId: string
-): Promise<SerializedQuestion> {
+): Promise<SerializedBankQuestionGroup> {
   const question = await QuestionModel.create({
-    ...data,
-    type: data.type as IQuestion["type"],
-    mediaIds: data.mediaIds.map((mediaId) => new mongoose.Types.ObjectId(mediaId)),
+    skill: data.skill,
+    part: data.part,
+    groupType: data.groupType as IQuestion["groupType"],
+    instructions: data.instructions ?? "",
+    config: data.config ?? {},
+    questions: data.questions.map((item) => ({
+      prompt: item.prompt ?? "",
+      acceptedAnswers: item.acceptedAnswers ?? [],
+      points: item.points ?? 1,
+      explanation: item.explanation,
+      mediaIds: toObjectIds(item.mediaIds),
+    })),
     createdBy: new mongoose.Types.ObjectId(userId),
   });
 
@@ -84,7 +111,7 @@ export async function list(
   userId?: string,
   role?: string
 ): Promise<{
-  questions: SerializedQuestion[];
+  questions: SerializedBankQuestionGroup[];
   page: number;
   limit: number;
   total: number;
@@ -95,7 +122,7 @@ export async function list(
 
   if (skill) query.skill = skill;
   if (part !== undefined) query.part = part;
-  if (type) query.type = type as IQuestion["type"];
+  if (type) query.groupType = type as IQuestion["groupType"];
 
   if (scope === "all") {
     if (createdBy) query.createdBy = createdBy;
@@ -108,7 +135,7 @@ export async function list(
   if (filters.search && filters.search.trim().length > 0) {
     // Same hardening as user search (FIX-21): escape before building the regex.
     const searchRegex = new RegExp(escapeRegExp(filters.search.trim()), "i");
-    query.$or = [{ prompt: searchRegex }, { content: searchRegex }];
+    query.$or = [{ instructions: searchRegex }, { "questions.prompt": searchRegex }];
   }
 
   const [questions, total] = await Promise.all([
@@ -120,7 +147,7 @@ export async function list(
   ]);
 
   return {
-    questions: questions.map(serializeQuestion),
+    questions: questions.map((question) => serializeQuestion(question as unknown as IQuestion)),
     page,
     limit,
     total,
@@ -133,11 +160,11 @@ export async function getById(
   userId?: string,
   role?: string,
   scope?: "own" | "all"
-): Promise<SerializedQuestion> {
+): Promise<SerializedBankQuestionGroup> {
   const question = await QuestionModel.findById(id);
 
   if (!question) {
-    throw new NotFoundError("Câu hỏi không tồn tại.");
+    throw new NotFoundError("Nhóm câu hỏi không tồn tại.");
   }
 
   if (
@@ -161,17 +188,28 @@ export async function update(
   const question = await QuestionModel.findById(id);
 
   if (!question) {
-    throw new NotFoundError("Câu hỏi không tồn tại.");
+    throw new NotFoundError("Nhóm câu hỏi không tồn tại.");
   }
 
   assertOwner(question, userId, role);
 
-  const updatePayload = { ...data } as UpdateQuery<IQuestion>;
-  if (data.mediaIds) {
-    updatePayload.mediaIds = data.mediaIds.map((mediaId) => new mongoose.Types.ObjectId(mediaId));
+  const patch: Record<string, unknown> = {};
+  if (data.skill !== undefined) patch.skill = data.skill;
+  if (data.part !== undefined) patch.part = data.part;
+  if (data.groupType !== undefined) patch.groupType = data.groupType;
+  if (data.instructions !== undefined) patch.instructions = data.instructions;
+  if (data.config !== undefined) patch.config = data.config;
+  if (data.questions !== undefined) {
+    patch.questions = data.questions.map((item) => ({
+      prompt: item.prompt ?? "",
+      acceptedAnswers: item.acceptedAnswers ?? [],
+      points: item.points ?? 1,
+      explanation: item.explanation,
+      mediaIds: toObjectIds(item.mediaIds),
+    }));
   }
 
-  await QuestionModel.findByIdAndUpdate(id, updatePayload, {
+  await QuestionModel.findByIdAndUpdate(id, patch, {
     new: true,
     runValidators: true,
   });
@@ -181,22 +219,12 @@ export async function remove(id: string, userId: string, role: string): Promise<
   const question = await QuestionModel.findById(id);
 
   if (!question) {
-    throw new NotFoundError("Câu hỏi không tồn tại.");
+    throw new NotFoundError("Nhóm câu hỏi không tồn tại.");
   }
 
   assertOwner(question, userId, role);
 
-  const examUsingQuestion = await ExamModel.findOne({
-    "sections.questionIds": question._id,
-    status: { $in: ["published", "closed"] },
-  }).select("_id title status");
-
-  if (examUsingQuestion) {
-    throw new BadRequestError(
-      "QUESTION_IN_USE",
-      `Không thể xóa câu hỏi đang được sử dụng trong đề thi "${examUsingQuestion.title}" (${examUsingQuestion.status}).`
-    );
-  }
-
+  // Exams embed a COPY of each group, so deleting a bank group can never break
+  // an existing exam — no referential-integrity guard is needed.
   await QuestionModel.deleteOne({ _id: question._id });
 }

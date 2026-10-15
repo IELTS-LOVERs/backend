@@ -12,14 +12,12 @@ import {
   list,
   mapSections,
   publish,
-  serializeQuestion,
   unpublish,
 } from "./exam.service.js";
 
 describe("mapSections", () => {
-  it("converts hex strings to ObjectIds for mediaIds and questionIds", () => {
-    const q1 = new mongoose.Types.ObjectId().toString();
-    const q2 = new mongoose.Types.ObjectId().toString();
+  it("converts hex strings to ObjectIds for mediaIds and group ids", () => {
+    const groupId = new mongoose.Types.ObjectId().toString();
     const m1 = new mongoose.Types.ObjectId().toString();
 
     const sections = mapSections([
@@ -30,17 +28,33 @@ describe("mapSections", () => {
         instructions: "Listen carefully",
         passageText: undefined,
         mediaIds: [m1],
-        questionIds: [q1, q2],
+        questionGroups: [
+          {
+            _id: groupId,
+            groupType: "form_completion",
+            instructions: "Complete the notes.",
+            config: { maxWords: 1 },
+            questions: [
+              {
+                questionNumber: 1,
+                prompt: "City: [1]",
+                acceptedAnswers: ["london"],
+                points: 1,
+                mediaIds: [],
+              },
+            ],
+          },
+        ],
       },
     ]);
 
     expect(sections).toHaveLength(1);
     expect(sections[0].skill).toBe("listening");
     expect(sections[0].part).toBe(1);
-    expect(sections[0].questionIds[0]).toBeInstanceOf(mongoose.Types.ObjectId);
-    expect(sections[0].questionIds[0].toString()).toBe(q1);
-    expect(sections[0].questionIds[1].toString()).toBe(q2);
     expect(sections[0].mediaIds?.[0].toString()).toBe(m1);
+    expect(sections[0].questionGroups).toHaveLength(1);
+    expect(sections[0].questionGroups[0].groupType).toBe("form_completion");
+    expect(sections[0].questionGroups[0]._id?.toString()).toBe(groupId);
   });
 });
 
@@ -60,37 +74,6 @@ describe("assertOwnership", () => {
   it("throws ForbiddenError for a non-owner teacher", () => {
     const exam = { createdBy: creatorId };
     expect(() => assertOwnership(exam, "stranger-teacher", "teacher")).toThrow(ForbiddenError);
-  });
-});
-
-describe("serializeQuestion", () => {
-  it("serializes populated question into expected response shape", () => {
-    const qId = new mongoose.Types.ObjectId();
-    const cId = new mongoose.Types.ObjectId();
-    const now = new Date();
-
-    const serialized = serializeQuestion({
-      _id: qId,
-      skill: "reading",
-      type: "true_false_not_given",
-      part: 2,
-      prompt: "Is the statement true?",
-      content: undefined,
-      data: {},
-      acceptedAnswers: ["TRUE"],
-      points: 1,
-      explanation: undefined,
-      mediaIds: [],
-      createdBy: cId,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    expect(serialized.id).toBe(qId.toString());
-    expect(serialized.skill).toBe("reading");
-    expect(serialized.content).toBeNull();
-    expect(serialized.explanation).toBeNull();
-    expect(serialized.createdBy).toBe(cId.toString());
   });
 });
 
@@ -117,7 +100,7 @@ describe("publish and unpublish", () => {
     const mockExam = {
       _id: examId,
       createdBy: teacherId,
-      sections: [{ questionIds: [] }],
+      sections: [{ questionGroups: [] }],
       status: "draft",
       save: vi.fn(),
     };
@@ -132,9 +115,20 @@ describe("publish and unpublish", () => {
     const mockExam = {
       _id: examId,
       createdBy: teacherId,
-      sections: [{ skill: "listening", questionIds: [new mongoose.Types.ObjectId()] }],
+      sections: [
+        {
+          skill: "listening",
+          questionGroups: [
+            {
+              groupType: "short_answer",
+              questions: [
+                { questionNumber: 1, prompt: "Q1", acceptedAnswers: ["answer"], points: 40 },
+              ],
+            },
+          ],
+        },
+      ],
       status: "draft",
-      populate: vi.fn().mockResolvedValue(undefined),
       save: vi.fn().mockResolvedValue(undefined),
     };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
@@ -258,18 +252,22 @@ describe("BUG-01 student exam projection", () => {
             part: 1,
             title: "S1",
             mediaIds: [],
-            questionIds: [
+            questionGroups: [
               {
-                _id: questionId,
-                skill: "listening",
-                type: "form_completion",
-                part: 1,
-                prompt: "City?",
-                data: {},
-                acceptedAnswers: ["london"],
-                explanation: "because the speaker said so",
-                mediaIds: [],
-                points: 1,
+                groupType: "form_completion",
+                instructions: "Complete the notes.",
+                config: {},
+                questions: [
+                  {
+                    _id: questionId,
+                    questionNumber: 1,
+                    prompt: "City?",
+                    acceptedAnswers: ["london"],
+                    explanation: "because the speaker said so",
+                    mediaIds: [],
+                    points: 1,
+                  },
+                ],
               },
             ],
           },

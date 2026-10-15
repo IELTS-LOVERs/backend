@@ -39,18 +39,6 @@ export interface CandidateMediaItem {
   originalName: string;
 }
 
-export interface CandidateExamQuestion {
-  id: string;
-  prompt: string;
-  type: string;
-  part: number;
-  points: number;
-  content: string | null;
-  data: Record<string, unknown>;
-  mediaIds: string[];
-  media: CandidateMediaItem[];
-}
-
 export interface CandidateQuestionItem {
   id: string;
   questionNumber: number;
@@ -65,6 +53,8 @@ export interface CandidateQuestionGroup {
   groupType: QuestionGroupType;
   instructions: string;
   config: Record<string, unknown>;
+  /** Resolved group-level image (config.imageMediaId) with a presigned URL. */
+  media: CandidateMediaItem[];
   questions: CandidateQuestionItem[];
 }
 
@@ -78,10 +68,7 @@ export interface CandidateExamSection {
   transcript: string | null;
   mediaIds: string[];
   media: CandidateMediaItem[];
-  /** New: question groups with structured data */
   questionGroups: CandidateQuestionGroup[];
-  /** Legacy: flat question list (empty when using groups) */
-  questions: CandidateExamQuestion[];
 }
 
 export interface CandidateExam {
@@ -163,20 +150,6 @@ export interface AttemptResult {
   details: ResultQuestionDetail[];
 }
 
-export interface RawPopulatedQuestion {
-  _id: Types.ObjectId;
-  skill?: SkillType;
-  type: string;
-  part: number;
-  prompt: string;
-  content?: string;
-  data?: Record<string, unknown>;
-  acceptedAnswers?: string[];
-  points?: number;
-  explanation?: string;
-  mediaIds?: unknown[];
-}
-
 export interface RawPopulatedSection {
   _id?: Types.ObjectId;
   skill: SkillType;
@@ -186,7 +159,6 @@ export interface RawPopulatedSection {
   passageText?: string;
   transcript?: string;
   mediaIds?: unknown[];
-  questionIds?: unknown[];
   questionGroups?: IQuestionGroup[];
 }
 
@@ -194,12 +166,6 @@ export interface RawExamObject {
   _id: Types.ObjectId;
   title: string;
   sections?: RawPopulatedSection[];
-}
-
-export interface GradableQuestion {
-  _id: Types.ObjectId;
-  acceptedAnswers?: string[];
-  points?: number;
 }
 
 export interface GradableGroupQuestion {
@@ -212,25 +178,11 @@ export interface GradableGroupQuestion {
 }
 
 export interface ExamQuestionBuckets {
-  listening: GradableQuestion[];
-  reading: GradableQuestion[];
   hasListening: boolean;
   hasReading: boolean;
   hasWriting: boolean;
-  /** New: group-based questions for grading with word-count support */
   listeningGrouped: GradableGroupQuestion[];
   readingGrouped: GradableGroupQuestion[];
-  usesGroups: boolean;
-}
-
-function isPopulatedQuestion(value: unknown): value is RawPopulatedQuestion {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "_id" in value &&
-    "prompt" in value &&
-    "type" in value
-  );
 }
 
 export function toCandidateMediaItem(
@@ -276,6 +228,21 @@ export function examMediaPresignTtl(durationMinutes: number): number {
   return durationMinutes * 60 + 1800;
 }
 
+/**
+ * Read a usable media ObjectId from a question group's `config.imageMediaId`.
+ *
+ * The id is stored as a plain string inside a Mixed config, so validate the
+ * 24-hex shape explicitly (mongoose's isValid would also accept 12-char ids).
+ */
+export function getGroupConfigImageId(
+  group: { config?: Record<string, unknown> } | null | undefined
+): string | undefined {
+  const raw = group?.config?.imageMediaId;
+  if (typeof raw !== "string") return undefined;
+  const str = raw.trim();
+  return /^[0-9a-fA-F]{24}$/.test(str) ? str : undefined;
+}
+
 /** Collect every media ObjectId referenced by an exam (all formats). */
 export function collectExamMediaIds(exam: IExam): string[] {
   const maybeToObject = exam as unknown as { toObject?: () => unknown };
@@ -295,19 +262,15 @@ export function collectExamMediaIds(exam: IExam): string[] {
     }
 
     for (const group of section.questionGroups ?? []) {
+      // Group-level image (config.imageMediaId) — resolve its presigned URL too.
+      const configImageId = getGroupConfigImageId(group);
+      if (configImageId) ids.add(configImageId);
+
       for (const question of group.questions ?? []) {
         for (const media of question.mediaIds ?? []) {
           const id = extractMediaId(media);
           if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
         }
-      }
-    }
-
-    for (const item of section.questionIds ?? []) {
-      if (!isPopulatedQuestion(item)) continue;
-      for (const media of item.mediaIds ?? []) {
-        const id = extractMediaId(media);
-        if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
       }
     }
   }
@@ -361,16 +324,11 @@ export function computeRemainingSeconds(
   return Math.max(0, Math.floor((expiresAt.getTime() - now) / 1000));
 }
 
-/** Collect all question IDs from a candidate exam (supports both formats) */
+/** Collect all question IDs from a candidate exam. */
 export function collectCandidateQuestionIds(exam: CandidateExam): string[] {
-  return exam.sections.flatMap((section) => {
-    if (section.questionGroups && section.questionGroups.length > 0) {
-      return section.questionGroups.flatMap((group) =>
-        group.questions.map((q) => q.id)
-      );
-    }
-    return (section.questions ?? []).map((question) => question.id);
-  });
+  return exam.sections.flatMap((section) =>
+    (section.questionGroups ?? []).flatMap((group) => group.questions.map((q) => q.id))
+  );
 }
 
 export function shuffleQuestionIds(questionIds: string[], seed: number): string[] {
@@ -409,8 +367,7 @@ export function applyQuestionOrder(exam: CandidateExam, order: string[]): Candid
     ...exam,
     sections: exam.sections.map((section) => ({
       ...section,
-      questions: sortByIdPosition(section.questions),
-      // FIX-09: a shuffled order must also apply to questions inside each group.
+      // FIX-09: a shuffled order applies to questions inside each group.
       // Group order itself is preserved — templates like [1][2] are bound to
       // questionNumber, so reordering groups would break the layout.
       questionGroups: (section.questionGroups ?? []).map((group) => ({
@@ -465,8 +422,7 @@ export function stripGroupConfig(
 
 /**
  * Whitelist-serializes a populated exam for the candidate, guaranteeing that
- * `acceptedAnswers` and `explanation` can never leak. Supports both
- * questionGroups (new) and questionIds (legacy) formats.
+ * `acceptedAnswers` and `explanation` can never leak.
  */
 export function buildCandidateExam(
   exam: IExam,
@@ -483,71 +439,41 @@ export function buildCandidateExam(
         .filter((m): m is CandidateMediaItem => m !== null);
       const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId);
 
-      const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
-
-      if (hasGroups) {
-        // New path: embedded question groups
-        const candidateGroups: CandidateQuestionGroup[] = (section.questionGroups ?? []).map((group) => ({
-          id: group._id?.toString() ?? "",
-          groupType: group.groupType,
-          instructions: group.instructions ?? "",
-          config: stripGroupConfig(group.config ?? {}),
-          questions: (group.questions ?? []).map((q) => {
-            const qMedia = (q.mediaIds ?? [])
-              .map((item) => toCandidateMediaItem(item, urlMap))
-              .filter((m): m is CandidateMediaItem => m !== null);
-            const qMediaIds = (q.mediaIds ?? []).map(extractMediaId);
-            return {
-              id: q._id?.toString() ?? "",
-              questionNumber: q.questionNumber,
-              prompt: q.prompt ?? "",
-              points: q.points ?? 1,
-              mediaIds: qMediaIds,
-              media: qMedia,
-            };
-          }),
-        }));
-
-        return {
-          id: section._id?.toString() ?? "",
-          skill: section.skill,
-          part: section.part,
-          title: section.title,
-          instructions: section.instructions ?? null,
-          passageText: section.passageText ?? null,
-          transcript: section.transcript ?? null,
-          mediaIds: sectionMediaIds,
-          media: sectionMedia,
-          questionGroups: candidateGroups,
-          questions: [],
-        };
-      }
-
-      // Legacy path: populated questionIds
-      const questions = (section.questionIds ?? [])
-        .filter(isPopulatedQuestion)
-        .map((question) => {
-          delete question.acceptedAnswers;
-          delete question.explanation;
-
-          const questionMedia = (question.mediaIds ?? [])
-            .map((item) => toCandidateMediaItem(item, urlMap))
-            .filter((m): m is CandidateMediaItem => m !== null);
-          const questionMediaIds = (question.mediaIds ?? []).map(extractMediaId);
+      const candidateGroups: CandidateQuestionGroup[] = (section.questionGroups ?? []).map(
+        (group) => {
+          // Group-level image (config.imageMediaId): expose the presigned URL
+          // additively via `media` so the exam engine can render it. The raw id
+          // stays inside `config` for the editor round-trip.
+          const groupImageId = getGroupConfigImageId(group);
+          const groupImageUrl = groupImageId ? urlMap?.get(groupImageId) : undefined;
+          const groupMedia: CandidateMediaItem[] =
+            groupImageId && groupImageUrl
+              ? [{ id: groupImageId, url: groupImageUrl, type: "image", originalName: "" }]
+              : [];
 
           return {
-            id: question._id.toString(),
-            skill: question.skill ?? section.skill,
-            prompt: question.prompt,
-            type: question.type,
-            part: question.part,
-            points: question.points ?? 1,
-            content: question.content ?? null,
-            data: question.data ?? {},
-            mediaIds: questionMediaIds,
-            media: questionMedia,
+            id: group._id?.toString() ?? "",
+            groupType: group.groupType,
+            instructions: group.instructions ?? "",
+            config: stripGroupConfig(group.config ?? {}),
+            media: groupMedia,
+            questions: (group.questions ?? []).map((q) => {
+              const qMedia = (q.mediaIds ?? [])
+                .map((item) => toCandidateMediaItem(item, urlMap))
+                .filter((m): m is CandidateMediaItem => m !== null);
+              const qMediaIds = (q.mediaIds ?? []).map(extractMediaId);
+              return {
+                id: q._id?.toString() ?? "",
+                questionNumber: q.questionNumber,
+                prompt: q.prompt ?? "",
+                points: q.points ?? 1,
+                mediaIds: qMediaIds,
+                media: qMedia,
+              };
+            }),
           };
-        });
+        }
+      );
 
       return {
         id: section._id?.toString() ?? "",
@@ -559,65 +485,41 @@ export function buildCandidateExam(
         transcript: section.transcript ?? null,
         mediaIds: sectionMediaIds,
         media: sectionMedia,
-        questionGroups: [],
-        questions,
+        questionGroups: candidateGroups,
       };
     }),
   };
 }
 
 export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestionBuckets {
-  const listening: GradableQuestion[] = [];
-  const reading: GradableQuestion[] = [];
   const listeningGrouped: GradableGroupQuestion[] = [];
   const readingGrouped: GradableGroupQuestion[] = [];
   let hasListening = false;
   let hasReading = false;
   let hasWriting = false;
-  let usesGroups = false;
 
   for (const section of examObj.sections ?? []) {
     if (section.skill === "listening") hasListening = true;
     else if (section.skill === "reading") hasReading = true;
     else if (section.skill === "writing") hasWriting = true;
 
-    const hasGroupData = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
-
-    if (hasGroupData) {
-      usesGroups = true;
-      for (const group of section.questionGroups!) {
-        for (const q of group.questions) {
-          const gradable: GradableGroupQuestion = {
-            _id: q._id,
-            questionNumber: q.questionNumber,
-            acceptedAnswers: q.acceptedAnswers ?? [],
-            points: q.points ?? 1,
-            groupConfig: group.config ?? {},
-            groupType: group.groupType,
-          };
-          if (section.skill === "listening") listeningGrouped.push(gradable);
-          else if (section.skill === "reading") readingGrouped.push(gradable);
-        }
+    for (const group of section.questionGroups ?? []) {
+      for (const q of group.questions ?? []) {
+        const gradable: GradableGroupQuestion = {
+          _id: q._id,
+          questionNumber: q.questionNumber,
+          acceptedAnswers: q.acceptedAnswers ?? [],
+          points: q.points ?? 1,
+          groupConfig: group.config ?? {},
+          groupType: group.groupType,
+        };
+        if (section.skill === "listening") listeningGrouped.push(gradable);
+        else if (section.skill === "reading") readingGrouped.push(gradable);
       }
-    }
-
-    // MIXED-FORMAT FIX: `questionIds` is collected independently of groups. An
-    // exam (or even a single section, via the API) can mix legacy `questionIds`
-    // with embedded `questionGroups`; finalize grades the SUM of both buckets,
-    // so legacy sections must never be skipped just because some other section
-    // uses groups.
-    for (const item of section.questionIds ?? []) {
-      if (!isPopulatedQuestion(item)) continue;
-
-      const skill = item.skill ?? section.skill;
-
-      if (skill === "listening") listening.push(item);
-      else if (skill === "reading") reading.push(item);
-      else if (skill === "writing") hasWriting = true;
     }
   }
 
-  return { listening, reading, hasListening, hasReading, hasWriting, listeningGrouped, readingGrouped, usesGroups };
+  return { hasListening, hasReading, hasWriting, listeningGrouped, readingGrouped };
 }
 
 /** Group types where a configured word limit actually applies to the answer. */
@@ -643,28 +545,6 @@ function checkWordLimit(answer: string, config: Record<string, unknown>): boolea
   if (!maxWords) return true;
   const wordCount = answer.trim().split(/\s+/).filter(Boolean).length;
   return wordCount <= maxWords;
-}
-
-export function gradeQuestions(
-  answers: Pick<IAttemptAnswer, "questionId" | "value">[],
-  questions: GradableQuestion[]
-): number {
-  // FIX-22: single pass into a Map instead of O(n×m) `.find()` per question.
-  const answerByQuestionId = new Map(
-    answers.map((answer) => [answer.questionId.toString(), answer.value])
-  );
-  let rawScore = 0;
-
-  for (const question of questions) {
-    const value = answerByQuestionId.get(question._id.toString());
-    if (value === undefined) continue;
-
-    if (matchAnswer(value, question.acceptedAnswers ?? [])) {
-      rawScore += question.points ?? 1;
-    }
-  }
-
-  return rawScore;
 }
 
 /** Grade questions from embedded question groups (with word-limit enforcement) */
@@ -749,12 +629,7 @@ function serializeStartResult(attempt: IAttempt, exam: CandidateExam): StartAtte
 
 async function loadPopulatedExam(examId: Types.ObjectId | string): Promise<IExam> {
   const exam = await ExamModel.findById(examId)
-    .populate({ path: "sections.mediaIds", model: "Media" })
-    .populate({
-      path: "sections.questionIds",
-      model: "Question",
-      populate: { path: "mediaIds", model: "Media" },
-    });
+    .populate({ path: "sections.mediaIds", model: "Media" });
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
@@ -931,7 +806,6 @@ export async function finalizeAttempt(
   const populatedExam = await loadPopulatedExam(attempt.examId);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
   const {
-    listening, reading,
     listeningGrouped, readingGrouped,
     hasListening, hasReading, hasWriting,
   } = collectExamQuestionBuckets(examObj);
@@ -947,22 +821,14 @@ export async function finalizeAttempt(
     overallBand: attempt.scores.overallBand,
   };
 
-  // MIXED-FORMAT FIX: answers live in exactly one bucket, so the score is the
-  // sum of the legacy bucket and the question-groups bucket. Previously a
-  // global `usesGroups` flag meant a mixed-format exam graded only ONE of the
-  // two, silently scoring 0 for the other format's sections.
   if (hasListening) {
-    const rawScore =
-      gradeQuestions(attempt.answers, listening) +
-      gradeGroupedQuestions(attempt.answers, listeningGrouped);
+    const rawScore = gradeGroupedQuestions(attempt.answers, listeningGrouped);
     scores.listeningRaw = rawScore;
     scores.listeningBand = calculateBandScore(rawScore, "listening");
   }
 
   if (hasReading) {
-    const rawScore =
-      gradeQuestions(attempt.answers, reading) +
-      gradeGroupedQuestions(attempt.answers, readingGrouped);
+    const rawScore = gradeGroupedQuestions(attempt.answers, readingGrouped);
     scores.readingRaw = rawScore;
     scores.readingBand = calculateBandScore(rawScore, "reading");
   }
@@ -1159,8 +1025,10 @@ export async function getAttemptResult(
   currentUser: { id: string; role: string }
 ): Promise<AttemptResult> {
   const attempt = await AttemptModel.findById(attemptId)
-    .populate("examId", "createdBy")
-    .populate("assignmentId", "teacherId showScoreAfterSubmit");
+    .populate([
+      { path: "examId", select: "createdBy" },
+      { path: "assignmentId", select: "teacherId showScoreAfterSubmit" },
+    ]);
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");
@@ -1197,50 +1065,27 @@ export async function getAttemptResult(
   );
 
   for (const section of examObj.sections ?? []) {
-    const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
+    for (const group of section.questionGroups ?? []) {
+      for (const q of group.questions ?? []) {
+        const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
+        const acceptedAnswers = q.acceptedAnswers ?? [];
 
-    if (hasGroups) {
-      // New path: question groups
-      for (const group of section.questionGroups!) {
-        for (const q of group.questions) {
-          const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
-          const acceptedAnswers = q.acceptedAnswers ?? [];
-
-          let isCorrect = false;
-          if (studentAnswer !== null) {
-            const withinWordLimit =
-              !shouldEnforceWordLimit(group.groupType) ||
-              checkWordLimit(studentAnswer, group.config ?? {});
-            isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
-          }
-
-          details.push({
-            questionId: q._id.toString(),
-            questionNumber: q.questionNumber,
-            groupType: group.groupType,
-            studentAnswer,
-            acceptedAnswers,
-            isCorrect,
-            explanation: q.explanation ?? null,
-          });
+        let isCorrect = false;
+        if (studentAnswer !== null) {
+          const withinWordLimit =
+            !shouldEnforceWordLimit(group.groupType) ||
+            checkWordLimit(studentAnswer, group.config ?? {});
+          isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
         }
-      }
-    } else {
-      // Legacy path: populated questionIds
-      for (const item of section.questionIds ?? []) {
-        if (!isPopulatedQuestion(item)) continue;
-
-        const question = item as RawPopulatedQuestion;
-        const studentAnswer = answerByQuestionId.get(question._id.toString()) ?? null;
-        const acceptedAnswers = question.acceptedAnswers ?? [];
 
         details.push({
-          questionId: question._id.toString(),
+          questionId: q._id.toString(),
+          questionNumber: q.questionNumber,
+          groupType: group.groupType,
           studentAnswer,
           acceptedAnswers,
-          isCorrect:
-            studentAnswer !== null && matchAnswer(studentAnswer, acceptedAnswers),
-          explanation: question.explanation ?? null,
+          isCorrect,
+          explanation: q.explanation ?? null,
         });
       }
     }

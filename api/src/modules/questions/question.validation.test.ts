@@ -7,22 +7,30 @@ import {
 
 const validBody = {
   skill: "listening",
-  type: "form_completion",
   part: 1,
-  prompt: "Write NO MORE THAN TWO WORDS for each answer.",
+  groupType: "form_completion",
+  instructions: "Write NO MORE THAN TWO WORDS for each answer.",
+  questions: [{ prompt: "City: [1]", acceptedAnswers: ["london"] }],
 };
 
 describe("CreateQuestionSchema", () => {
-  it("accepts a valid payload and applies defaults", () => {
+  it("accepts a valid question group payload and applies defaults", () => {
     const result = CreateQuestionSchema.safeParse({ body: validBody });
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.body.points).toBe(1);
-      expect(result.data.body.data).toEqual({});
-      expect(result.data.body.acceptedAnswers).toEqual([]);
-      expect(result.data.body.mediaIds).toEqual([]);
+      expect(result.data.body.config).toEqual({});
+      expect(result.data.body.questions).toHaveLength(1);
+      expect(result.data.body.questions[0].points).toBe(1);
+      expect(result.data.body.questions[0].acceptedAnswers).toEqual(["london"]);
+      expect(result.data.body.questions[0].mediaIds).toEqual([]);
     }
+  });
+
+  it("rejects an empty questions array", () => {
+    expect(
+      CreateQuestionSchema.safeParse({ body: { ...validBody, questions: [] } }).success
+    ).toBe(false);
   });
 
   it("rejects an invalid skill and out-of-range part", () => {
@@ -37,24 +45,23 @@ describe("UpdateQuestionSchema", () => {
   it("allows a partial body", () => {
     const result = UpdateQuestionSchema.safeParse({
       params: { id: "66e8621c262f3b9200000003" },
-      body: { prompt: "Updated prompt" },
+      body: { instructions: "Updated instructions" },
     });
 
     expect(result.success).toBe(true);
   });
 
-  it("does not inject schema defaults into a partial body (would wipe answers/metadata)", () => {
+  it("does not inject schema defaults into a partial body (would wipe stored data)", () => {
     const result = UpdateQuestionSchema.safeParse({
       params: { id: "66e8621c262f3b9200000003" },
-      body: { prompt: "Updated prompt" },
+      body: { instructions: "Updated instructions" },
     });
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.body.acceptedAnswers).toBeUndefined();
-      expect(result.data.body.mediaIds).toBeUndefined();
-      expect(result.data.body.data).toBeUndefined();
-      expect(result.data.body.points).toBeUndefined();
+      expect(result.data.body.groupType).toBeUndefined();
+      expect(result.data.body.config).toBeUndefined();
+      expect(result.data.body.questions).toBeUndefined();
     }
   });
 });

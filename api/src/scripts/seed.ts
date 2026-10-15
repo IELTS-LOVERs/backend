@@ -7,7 +7,7 @@ import { generateClassCode } from "../modules/classes/class.service.js";
 import { ExamModel } from "../modules/exams/exam.model.js";
 import {
   QuestionModel,
-  type QuestionType,
+  type QuestionGroupType,
   type SkillType,
 } from "../modules/questions/question.model.js";
 import { UserModel, type IUser, type UserRole } from "../modules/users/user.model.js";
@@ -21,15 +21,21 @@ interface SeedUserInput {
   role: UserRole;
 }
 
-interface SeedQuestionInput {
-  skill: SkillType;
-  type: QuestionType;
-  part: number;
+interface SeedQuestionItem {
   prompt: string;
-  data?: Record<string, unknown>;
-  acceptedAnswers?: string[];
+  acceptedAnswers: string[];
   points?: number;
   explanation?: string;
+}
+
+/** A reusable Question Group stored in the bank. */
+interface SeedBankGroup {
+  skill: SkillType;
+  part: number;
+  groupType: QuestionGroupType;
+  instructions: string;
+  config?: Record<string, unknown>;
+  questions: SeedQuestionItem[];
 }
 
 async function upsertUser(input: SeedUserInput): Promise<IUser> {
@@ -55,21 +61,53 @@ async function upsertUser(input: SeedUserInput): Promise<IUser> {
   return user;
 }
 
-async function upsertQuestion(
+async function upsertBankGroup(
   createdBy: mongoose.Types.ObjectId,
-  input: SeedQuestionInput
+  input: SeedBankGroup
 ): Promise<mongoose.Types.ObjectId> {
-  const question = await QuestionModel.findOneAndUpdate(
-    { prompt: input.prompt, createdBy },
-    { $set: { ...input, createdBy } },
+  const group = await QuestionModel.findOneAndUpdate(
+    { skill: input.skill, part: input.part, groupType: input.groupType, createdBy },
+    {
+      $set: {
+        skill: input.skill,
+        part: input.part,
+        groupType: input.groupType,
+        instructions: input.instructions,
+        config: input.config ?? {},
+        questions: input.questions.map((q) => ({
+          prompt: q.prompt,
+          acceptedAnswers: q.acceptedAnswers,
+          points: q.points ?? 1,
+          explanation: q.explanation,
+        })),
+        createdBy,
+      },
+    },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
   );
 
-  if (!question) {
-    throw new Error(`Không thể tạo câu hỏi: ${input.prompt}`);
+  if (!group) {
+    throw new Error(`Không thể tạo nhóm câu hỏi: ${input.instructions}`);
   }
 
-  return question._id;
+  return group._id;
+}
+
+/** Embed a list of bank groups into an exam section, numbering questions continuously. */
+function toExamQuestionGroups(groups: SeedBankGroup[], startNumber: number) {
+  let n = startNumber;
+  return groups.map((group) => ({
+    groupType: group.groupType,
+    instructions: group.instructions,
+    config: group.config ?? {},
+    questions: group.questions.map((q) => ({
+      questionNumber: n++,
+      prompt: q.prompt,
+      acceptedAnswers: q.acceptedAnswers,
+      points: q.points ?? 1,
+      explanation: q.explanation,
+    })),
+  }));
 }
 
 async function main(): Promise<void> {
@@ -118,73 +156,108 @@ async function main(): Promise<void> {
       throw new Error("Không thể tạo lớp học");
     }
 
-    const listeningFormQuestionId = await upsertQuestion(teacher._id, {
+    // ── Question bank (Question Groups) ────────────────────────────────────
+    const listeningFormGroup: SeedBankGroup = {
       skill: "listening",
-      type: "form_completion",
       part: 1,
-      prompt: "Complete the notes. Write ONE WORD for each answer. City: [1]",
-      data: { templateText: "City: [1]" },
-      acceptedAnswers: ["london"],
-      points: 1,
-      explanation: "The speaker says she lives in London.",
-    });
-    const listeningChoiceQuestionId = await upsertQuestion(teacher._id, {
+      groupType: "form_completion",
+      instructions: "Complete the notes below. Write ONE WORD for each answer.",
+      config: { maxWords: 1, allowNumbers: true, template: "City: [1]" },
+      questions: [
+        {
+          prompt: "City: [1]",
+          acceptedAnswers: ["london"],
+          explanation: "The speaker says she lives in London.",
+        },
+      ],
+    };
+    const listeningChoiceGroup: SeedBankGroup = {
       skill: "listening",
-      type: "multiple_choice",
       part: 1,
-      prompt: "What time does the museum tour start?",
-      data: {
+      groupType: "multiple_choice_single",
+      instructions: "Choose the correct letter, A, B or C.",
+      config: {
         options: [
           { id: "A", text: "9:00" },
           { id: "B", text: "10:30" },
           { id: "C", text: "14:00" },
         ],
       },
-      acceptedAnswers: ["B"],
-      points: 1,
-      explanation: "The guide says the tour starts at 10:30.",
-    });
-    const readingTrueFalseQuestionId = await upsertQuestion(teacher._id, {
+      questions: [
+        {
+          prompt: "What time does the museum tour start?",
+          acceptedAnswers: ["B"],
+          explanation: "The guide says the tour starts at 10:30.",
+        },
+      ],
+    };
+    const readingTfngGroup: SeedBankGroup = {
       skill: "reading",
-      type: "true_false_not_given",
       part: 1,
-      prompt: "The museum is open on Mondays. TRUE / FALSE / NOT GIVEN",
-      data: {
+      groupType: "true_false_not_given",
+      instructions:
+        "Do the following statements agree with the information given in the passage?",
+      config: {
         options: [
-          { id: "TRUE", text: "True" },
-          { id: "FALSE", text: "False" },
-          { id: "NOT GIVEN", text: "Not Given" },
+          { id: "TRUE", text: "TRUE" },
+          { id: "FALSE", text: "FALSE" },
+          { id: "NOT GIVEN", text: "NOT GIVEN" },
         ],
       },
-      acceptedAnswers: ["TRUE"],
-      points: 1,
-      explanation: "Paragraph 1 states the museum opens daily including Mondays.",
-    });
-    const readingMatchingQuestionId = await upsertQuestion(teacher._id, {
+      questions: [
+        {
+          prompt: "The museum is open on Mondays.",
+          acceptedAnswers: ["TRUE"],
+          explanation: "Paragraph 1 states the museum opens daily including Mondays.",
+        },
+      ],
+    };
+    const readingHeadingsGroup: SeedBankGroup = {
       skill: "reading",
-      type: "matching_headings",
       part: 1,
-      prompt: "Choose the correct heading for Paragraph A.",
-      data: {
-        headings: [
+      groupType: "matching_headings",
+      instructions: "Choose the correct heading for Paragraph A from the list below.",
+      config: {
+        headingsPool: [
           { id: "i", text: "A brief history" },
           { id: "ii", text: "Funding challenges" },
           { id: "iii", text: "The early years" },
         ],
+        allowReuse: false,
       },
-      acceptedAnswers: ["iii"],
-      points: 1,
-      explanation: "Paragraph A focuses on the early years of the institution.",
-    });
-    const writingTask1QuestionId = await upsertQuestion(teacher._id, {
+      questions: [
+        {
+          prompt: "Paragraph A",
+          acceptedAnswers: ["iii"],
+          explanation: "Paragraph A focuses on the early years of the institution.",
+        },
+      ],
+    };
+    const writingTask1Group: SeedBankGroup = {
       skill: "writing",
-      type: "writing_task_1",
       part: 1,
-      prompt:
-        "The chart below shows the number of international students in three countries between 2000 and 2020. Summarise the information by selecting and reporting the main features, and make comparisons where relevant. Write at least 150 words.",
-      acceptedAnswers: [],
-      points: 1,
-    });
+      groupType: "writing_task_1",
+      instructions:
+        "You should spend about 20 minutes on this task. Write at least 150 words.",
+      config: { minWords: 150 },
+      questions: [
+        {
+          prompt:
+            "The chart below shows the number of international students in three countries between 2000 and 2020. Summarise the information by selecting and reporting the main features, and make comparisons where relevant.",
+          acceptedAnswers: [],
+        },
+      ],
+    };
+
+    for (const group of [
+      listeningFormGroup,
+      listeningChoiceGroup,
+      readingTfngGroup,
+      readingHeadingsGroup,
+      writingTask1Group,
+    ]) {
+      await upsertBankGroup(teacher._id, group);
+    }
 
     const exam = await ExamModel.findOneAndUpdate(
       { title: "IELTS Academic Mock Test 01", createdBy: teacher._id },
@@ -199,21 +272,29 @@ async function main(): Promise<void> {
               part: 1,
               title: "Listening Part 1",
               instructions: "Answer questions 1-2.",
-              questionIds: [listeningFormQuestionId, listeningChoiceQuestionId],
+              questionGroups: toExamQuestionGroups(
+                [listeningFormGroup, listeningChoiceGroup],
+                1
+              ),
             },
             {
               skill: "reading",
               part: 1,
-              title: "Reading Part 1",
+              title: "Reading Passage 1",
               instructions: "Answer questions 3-4.",
-              questionIds: [readingTrueFalseQuestionId, readingMatchingQuestionId],
+              passageText:
+                "The city museum first opened its doors in 1892 and has served the public every day since, including Mondays.",
+              questionGroups: toExamQuestionGroups(
+                [readingTfngGroup, readingHeadingsGroup],
+                3
+              ),
             },
             {
               skill: "writing",
               part: 1,
               title: "Writing Task 1",
               instructions: "You should spend about 20 minutes on this task.",
-              questionIds: [writingTask1QuestionId],
+              questionGroups: toExamQuestionGroups([writingTask1Group], 1),
             },
           ],
         },

@@ -16,7 +16,7 @@ describe("CreateExamSchema", () => {
     }
   });
 
-  it("accepts a valid section and applies questionIds default", () => {
+  it("accepts a valid section and applies questionGroups default", () => {
     const result = CreateExamSchema.safeParse({
       body: {
         ...validBody,
@@ -26,7 +26,7 @@ describe("CreateExamSchema", () => {
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.body.sections[0]?.questionIds).toEqual([]);
+      expect(result.data.body.sections[0]?.questionGroups).toEqual([]);
     }
   });
 

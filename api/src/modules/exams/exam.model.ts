@@ -33,8 +33,6 @@ export interface IExamSection {
   transcript?: string;
   mediaIds?: Types.ObjectId[];
   questionGroups: IQuestionGroup[];
-  /** @deprecated Use questionGroups instead. Kept for backward compatibility. */
-  questionIds?: Types.ObjectId[];
 }
 
 export interface IExam extends mongoose.Document {
@@ -83,7 +81,6 @@ const ExamSectionSchema = new Schema<IExamSection>(
     transcript: { type: String },
     mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],
     questionGroups: [QuestionGroupSchema],
-    questionIds: [{ type: Schema.Types.ObjectId, ref: "Question" }],
   },
   { _id: true }
 );

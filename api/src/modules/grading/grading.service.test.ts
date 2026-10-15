@@ -76,9 +76,7 @@ describe("gradeWriting", () => {
       save: vi.fn(),
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
     vi.spyOn(WritingReviewModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: new mongoose.Types.ObjectId(),
@@ -110,9 +108,7 @@ describe("gradeWriting", () => {
       save: vi.fn(),
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
     vi.spyOn(WritingReviewModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: new mongoose.Types.ObjectId(),
@@ -144,9 +140,7 @@ describe("gradeWriting", () => {
       save: vi.fn(),
     };
     vi.spyOn(AttemptModel, "findById").mockReturnValue({
-      populate: vi.fn().mockReturnValue({
-        populate: vi.fn().mockResolvedValue(mockAttempt),
-      }),
+      populate: vi.fn().mockResolvedValue(mockAttempt),
     } as never);
     vi.spyOn(WritingReviewModel, "findOneAndUpdate").mockResolvedValueOnce({
       _id: new mongoose.Types.ObjectId(),

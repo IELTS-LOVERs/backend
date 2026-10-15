@@ -4,7 +4,7 @@ const { Schema, model } = mongoose;
 
 export type SkillType = "listening" | "reading" | "writing";
 
-// New: Used for question groups embedded in exams
+// Used for question groups embedded in exams AND for the question bank.
 export type QuestionGroupType =
   | "multiple_choice_single"
   | "multiple_choice_multiple"
@@ -27,64 +27,96 @@ export type QuestionGroupType =
   | "writing_task_1"
   | "writing_task_2";
 
+/**
+ * Legacy flat question types.
+ *
+ * @deprecated The bank stores Question Groups (`groupType`). Kept only so
+ * remaining tooling/tests can reference the old shape.
+ */
 export type QuestionType =
-  | "multiple_choice"          // legacy, maps to multiple_choice_single
-  | "multiple_choice_single"   // NEW
-  | "multiple_choice_multiple" // NEW
+  | "multiple_choice"
+  | "multiple_choice_single"
+  | "multiple_choice_multiple"
   | "form_completion"
   | "note_completion"
   | "table_completion"
   | "sentence_completion"
-  | "matching"                 // legacy, generic matching
+  | "matching"
   | "matching_headings"
-  | "matching_information"     // NEW
-  | "matching_features"        // NEW
-  | "matching_sentence_endings" // NEW
+  | "matching_information"
+  | "matching_features"
+  | "matching_sentence_endings"
   | "map_labelling"
   | "diagram_labelling"
   | "summary_completion"
   | "true_false_not_given"
   | "yes_no_not_given"
-  | "short_answer"             // NEW
-  | "flow_chart_completion"    // NEW
+  | "short_answer"
+  | "flow_chart_completion"
   | "writing_task_1"
   | "writing_task_2";
 
-export interface IQuestion extends mongoose.Document {
+/** One answer slot stored inside a bank Question Group. */
+export interface IBankQuestionItem {
   _id: Types.ObjectId;
-  skill: SkillType;
-  type: QuestionType;
-  part: number;
   prompt: string;
-  content?: string;
-  data: Record<string, unknown>;
   acceptedAnswers: string[];
   points: number;
   explanation?: string;
   mediaIds: Types.ObjectId[];
+}
+
+/**
+ * Question Bank document — a reusable Question Group template.
+ *
+ * Mirrors the shape embedded in an exam section (`ExamSection.questionGroups`)
+ * minus `questionNumber` (numbers are assigned when the group is inserted into
+ * an exam).
+ */
+export interface IQuestion extends mongoose.Document {
+  _id: Types.ObjectId;
+  skill: SkillType;
+  part: number;
+  groupType: QuestionGroupType;
+  instructions: string;
+  config: Record<string, unknown>;
+  questions: IBankQuestionItem[];
   createdBy: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const QuestionSchema = new Schema<IQuestion>(
+const BankQuestionItemSchema = new Schema<IBankQuestionItem>(
   {
-    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
-    type: { type: String, required: true },
-    part: { type: Number, required: true },
-    prompt: { type: String, required: true },
-    content: { type: String },
-    data: { type: Schema.Types.Mixed, default: {} },
+    prompt: { type: String, default: "" },
     acceptedAnswers: [{ type: String, trim: true }],
     points: { type: Number, default: 1 },
     explanation: { type: String },
     mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],
+  },
+  { _id: true }
+);
+
+const QuestionSchema = new Schema<IQuestion>(
+  {
+    skill: { type: String, enum: ["listening", "reading", "writing"], required: true },
+    part: { type: Number, required: true },
+    groupType: { type: String, required: true },
+    instructions: { type: String, default: "" },
+    config: { type: Schema.Types.Mixed, default: {} },
+    questions: [BankQuestionItemSchema],
+
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: true, versionKey: false }
 );
 
-QuestionSchema.index({ skill: 1, part: 1, type: 1 });
+QuestionSchema.index({ skill: 1, part: 1, groupType: 1 });
 QuestionSchema.index({ createdBy: 1 });
+
+// A bank entry is a Question Group: it must contain at least one question.
+QuestionSchema.path("questions").validate(function (value: IBankQuestionItem[]) {
+  return Array.isArray(value) && value.length > 0;
+}, "Nhóm câu hỏi phải có ít nhất 1 câu");
 
 export const QuestionModel = model<IQuestion>("Question", QuestionSchema);

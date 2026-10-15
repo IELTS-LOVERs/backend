@@ -73,15 +73,8 @@ interface PopulatedStudentSummary {
   email?: string;
 }
 
-interface PopulatedWritingQuestion {
-  _id: Types.ObjectId;
-  type?: string;
-  prompt?: string;
-}
-
 interface PopulatedGradingSection {
   skill?: string;
-  questionIds?: unknown[];
   questionGroups?: Array<{
     groupType?: string;
     questions?: Array<{
@@ -94,15 +87,6 @@ interface PopulatedGradingSection {
 interface PopulatedGradingExam extends OwnershipExam {
   title?: string;
   sections?: PopulatedGradingSection[];
-}
-
-function isPopulatedWritingQuestion(value: unknown): value is PopulatedWritingQuestion {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "_id" in value &&
-    "type" in value
-  );
 }
 
 /** Counts whitespace-separated words; empty/blank strings yield 0. */
@@ -153,9 +137,11 @@ export async function getPendingWritingSubmissions(
   const attempts = await AttemptModel.find({
     status: { $in: ["submitted", "expired"] },
   })
-    .populate("examId", "title createdBy sections.skill")
-    .populate("studentId", "fullName email")
-    .populate("assignmentId", "teacherId")
+    .populate([
+      { path: "examId", select: "title createdBy sections.skill" },
+      { path: "studentId", select: "fullName email" },
+      { path: "assignmentId", select: "teacherId" },
+    ])
     .sort({ submittedAt: 1 });
 
   const gradable = attempts.filter((attempt) => {
@@ -221,9 +207,10 @@ export async function getAttemptForGrading(
   role: string
 ): Promise<AttemptGradingView> {
   const attempt = await AttemptModel.findById(attemptId)
-    .populate({ path: "examId", populate: { path: "sections.questionIds" } })
-    .populate("assignmentId", "teacherId")
-    .populate("studentId", "fullName");
+    .populate([
+      { path: "assignmentId", select: "teacherId" },
+      { path: "studentId", select: "fullName" },
+    ]);
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");
@@ -265,28 +252,6 @@ export async function getAttemptForGrading(
       }
       continue;
     }
-
-    // Legacy path: populated questionIds
-    for (const item of section.questionIds ?? []) {
-      if (!isPopulatedWritingQuestion(item)) continue;
-
-      const task: 1 | 2 | null =
-        item.type === "writing_task_1" ? 1 : item.type === "writing_task_2" ? 2 : null;
-
-      if (task === null || tasksByNumber.has(task)) continue;
-
-      const answer = attempt.answers.find(
-        (candidate) => candidate.questionId.toString() === item._id.toString()
-      );
-      const studentContent = answer?.value ?? "";
-
-      tasksByNumber.set(task, {
-        task,
-        prompt: item.prompt ?? "",
-        studentContent,
-        wordCount: countWords(studentContent),
-      });
-    }
   }
 
   const writingTasks = [...tasksByNumber.values()].sort((a, b) => a.task - b.task);
@@ -307,8 +272,10 @@ export async function gradeWriting(
   role: string
 ): Promise<GradeWritingResult> {
   const attempt = await AttemptModel.findById(data.attemptId)
-    .populate("examId", "createdBy")
-    .populate("assignmentId", "teacherId");
+    .populate([
+      { path: "examId", select: "createdBy" },
+      { path: "assignmentId", select: "teacherId" },
+    ]);
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");

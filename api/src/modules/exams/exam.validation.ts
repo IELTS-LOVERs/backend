@@ -97,8 +97,6 @@ const ExamSectionInputSchema = z.object({
   transcript: z.string().optional().nullable(),
   mediaIds: z.array(z.string()).optional(),
   questionGroups: z.array(QuestionGroupInputSchema).optional().default([]),
-  /** @deprecated Use questionGroups. Kept for backward compatibility. */
-  questionIds: z.array(z.string()).optional().default([]),
 });
 
 export const CreateExamSchema = z.object({

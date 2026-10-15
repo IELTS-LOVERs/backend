@@ -194,4 +194,25 @@ describe("deleteMedia", () => {
 
     await expect(deleteMedia(mediaId, teacherId, "teacher")).rejects.toThrow(/đang được/);
   });
+
+  it("includes group-level config.imageMediaId in the in-use check", async () => {
+    vi.spyOn(MediaModel, "findById").mockResolvedValueOnce({
+      _id: mediaId,
+      uploadedBy: new mongoose.Types.ObjectId(teacherId),
+      key: "test.png",
+    } as never);
+    const questionExists = vi.spyOn(QuestionModel, "exists").mockResolvedValue(null);
+    const examExists = vi.spyOn(ExamModel, "exists").mockResolvedValue(null);
+    vi.spyOn(minioClient, "removeObject").mockResolvedValueOnce(undefined as never);
+    vi.spyOn(MediaModel, "findByIdAndDelete").mockResolvedValueOnce({} as never);
+
+    await deleteMedia(mediaId, teacherId, "teacher");
+
+    expect(JSON.stringify(questionExists.mock.calls.at(-1)?.[0])).toContain(
+      "config.imageMediaId"
+    );
+    expect(JSON.stringify(examExists.mock.calls.at(-1)?.[0])).toContain(
+      "sections.questionGroups.config.imageMediaId"
+    );
+  });
 });

@@ -17,7 +17,6 @@ router.put("/:id", validate(UpdateExamSchema), examController.updateExam);
 router.patch("/:id/metadata", validate(UpdateExamMetadataSchema), examController.updateExamMetadata);
 router.delete("/:id", examController.deleteExam);
 router.post("/:id/clone", examController.cloneExam);
-router.post("/:id/migrate", examController.migrateExam);
 router.patch("/:id/publish", examController.publishExam);
 router.patch("/:id/unpublish", examController.unpublishExam);
 router.patch("/:id/close", examController.closeExam);
