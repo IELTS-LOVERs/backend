@@ -144,7 +144,14 @@ export interface AttemptWritingReview {
 export interface AttemptResult {
   attemptId: string;
   examId: string;
+  examTitle?: string;
+  examDurationMinutes?: number;
+  studentName?: string;
+  studentEmail?: string;
   status: AttemptStatus;
+  startedAt?: Date;
+  submittedAt?: Date;
+  durationSeconds?: number;
   scores: IAttemptScores;
   writingReview: AttemptWritingReview | null;
   details: ResultQuestionDetail[];
@@ -1026,7 +1033,8 @@ export async function getAttemptResult(
 ): Promise<AttemptResult> {
   const attempt = await AttemptModel.findById(attemptId)
     .populate([
-      { path: "examId", select: "createdBy" },
+      { path: "examId", select: "createdBy title durationMinutes" },
+      { path: "studentId", select: "name fullName email" },
       { path: "assignmentId", select: "teacherId showScoreAfterSubmit" },
     ]);
 
@@ -1093,10 +1101,27 @@ export async function getAttemptResult(
 
   const review = await WritingReviewModel.findOne({ attemptId: attempt._id });
 
+  const student = attempt.studentId as unknown as { name?: string; fullName?: string; email?: string } | null;
+  const exam = attempt.examId as unknown as { title?: string; durationMinutes?: number } | null;
+
+  const startedAt = attempt.startedAt;
+  const submittedAt = attempt.submittedAt ?? attempt.updatedAt;
+  const durationSeconds =
+    startedAt && submittedAt
+      ? Math.max(0, Math.round((new Date(submittedAt).getTime() - new Date(startedAt).getTime()) / 1000))
+      : undefined;
+
   return {
     attemptId: attempt._id.toString(),
     examId: examIdRef.toString(),
+    examTitle: exam?.title,
+    examDurationMinutes: exam?.durationMinutes,
+    studentName: student?.fullName ?? student?.name,
+    studentEmail: student?.email,
     status: attempt.status,
+    startedAt,
+    submittedAt,
+    durationSeconds,
     scores: showScore ? serializeScores(attempt.scores) : {},
     writingReview: review
       ? {
