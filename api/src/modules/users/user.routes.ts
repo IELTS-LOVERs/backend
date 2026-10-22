@@ -56,6 +56,12 @@ router.post(
   validate(AdminResetPasswordSchema),
   userController.adminResetPassword
 );
+router.post(
+  "/:id/revoke-sessions",
+  authenticate,
+  requireRoles("admin"),
+  userController.revokeSessions
+);
 
 export { router as userRoutes };
 export default router;

@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { env } from "../../config/env.js";
 import { UnauthorizedError } from "../errors/AppError.js";
 import { UserModel } from "../../modules/users/user.model.js";
+import { isSingleDeviceRole } from "../../modules/auth/auth.policy.js";
 
 export interface AccessTokenPayload {
   sub: string;
@@ -10,6 +11,7 @@ export interface AccessTokenPayload {
   email: string;
   tokenVersion?: number;
   type?: "access";
+  sid?: string;
 }
 
 /**
@@ -61,7 +63,7 @@ export async function authenticate(
 
   try {
     const user = await UserModel.findById(payload.sub).select(
-      "status tokenVersion role email"
+      "status tokenVersion role email activeSessionId"
     );
 
     if (!user || user.status === "suspended") {
@@ -72,6 +74,31 @@ export async function authenticate(
     if ((payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
       next(new UnauthorizedError("TOKEN_REVOKED", "Phiên đăng nhập đã bị thu hồi."));
       return;
+    }
+
+    // Single-device policy (last-login-wins): the access token must belong to
+    // the currently active session. Legacy tokens without `sid` are asked to
+    // refresh once so they can be upgraded in place.
+    if (isSingleDeviceRole(user.role)) {
+      if (!payload.sid || !user.activeSessionId) {
+        next(
+          new UnauthorizedError(
+            "SESSION_REQUIRED",
+            "Phiên đăng nhập cần được làm mới. Vui lòng thử lại."
+          )
+        );
+        return;
+      }
+
+      if (payload.sid !== user.activeSessionId) {
+        next(
+          new UnauthorizedError(
+            "SESSION_REPLACED",
+            "Phiên đăng nhập đã được thay thế bởi thiết bị khác."
+          )
+        );
+        return;
+      }
     }
 
     req.user = {

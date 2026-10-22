@@ -118,6 +118,18 @@ describe("UpdateExamSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts the text-selection option", () => {
+    const result = UpdateExamSchema.safeParse({
+      params: { id: "66e8641c262f3b9200000004" },
+      body: { disableTextSelection: true },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.body.disableTextSelection).toBe(true);
+    }
+  });
+
   it("does not inject schema defaults into a partial body (would wipe sections)", () => {
     const result = UpdateExamSchema.safeParse({
       params: { id: "66e8641c262f3b9200000004" },

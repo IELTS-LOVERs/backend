@@ -34,9 +34,11 @@ export async function register(req: Request, res: Response): Promise<void> {
 }
 
 export async function login(req: Request, res: Response): Promise<void> {
+  const existingRefreshToken = req.cookies?.[REFRESH_COOKIE_NAME] as string | undefined;
   const { user, accessToken, refreshToken } = await authService.login(
     req.body,
-    req.get("user-agent") ?? undefined
+    req.get("user-agent") ?? undefined,
+    existingRefreshToken
   );
 
   setRefreshCookie(res, refreshToken);

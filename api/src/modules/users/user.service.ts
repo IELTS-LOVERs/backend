@@ -58,6 +58,7 @@ export async function resetPassword(userId: string, newPassword: string): Promis
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
   // FIX-04: admin password reset invalidates every refresh session.
   user.refreshSessions = [];
+  user.activeSessionId = undefined;
   await user.save();
 
   logger.info("auth.admin_password_reset", { userId });
@@ -143,6 +144,7 @@ export async function updateUserStatus(
     user.tokenVersion = (user.tokenVersion ?? 0) + 1;
     // FIX-04: suspension revokes every refresh session for the account.
     user.refreshSessions = [];
+    user.activeSessionId = undefined;
   }
 
   await user.save();
@@ -150,4 +152,23 @@ export async function updateUserStatus(
   logger.info("users.status_updated", { userId, status });
 
   return user;
+}
+
+/**
+ * Admin chủ động đăng xuất một người dùng khỏi mọi thiết bị.
+ * Tăng tokenVersion để vô hiệu hoá luôn access token đang lưu hành.
+ */
+export async function revokeSessions(userId: string): Promise<void> {
+  const user = await UserModel.findById(userId);
+
+  if (!user) {
+    throw new NotFoundError("Người dùng không tồn tại.");
+  }
+
+  user.refreshSessions = [];
+  user.activeSessionId = undefined;
+  user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+  await user.save();
+
+  logger.info("auth.admin_revoke_sessions", { userId });
 }

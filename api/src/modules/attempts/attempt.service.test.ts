@@ -89,6 +89,21 @@ describe("buildCandidateExam", () => {
     }),
   } as unknown as IExam;
 
+  it("defaults disableTextSelection to false", () => {
+    const candidate = buildCandidateExam(examStub);
+    expect(candidate.disableTextSelection).toBe(false);
+  });
+
+  it("exposes disableTextSelection to candidates", () => {
+    const examWithBlock = {
+      ...examStub,
+      disableTextSelection: true,
+    } as unknown as IExam;
+
+    const candidate = buildCandidateExam(examWithBlock);
+    expect(candidate.disableTextSelection).toBe(true);
+  });
+
   it("strips acceptedAnswers and explanation from every question", () => {
     const candidate = buildCandidateExam(examStub);
     const serialized = JSON.stringify(candidate);

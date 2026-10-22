@@ -1,8 +1,12 @@
 import mongoose, { type Types } from "mongoose";
-import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import {
+  BadRequestError,
+  ForbiddenError,
+  NotFoundError,
+} from "../../common/errors/AppError.js";
+import { canStaffViewStudent } from "../../common/utils/student-access.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
 import { AttemptModel, type IAttemptScores } from "../attempts/attempt.model.js";
-import { AssignmentModel } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { assertOwnership } from "../exams/exam.service.js";
@@ -285,31 +289,28 @@ export async function getStudentProgress(
   if (
     currentUser.role === "teacher" &&
     query.studentId &&
-    query.studentId !== currentUser.id
+    query.studentId !== currentUser.id &&
+    !(await canStaffViewStudent(currentUser, query.studentId))
   ) {
-    const allowed =
-      mongoose.isValidObjectId(query.studentId) &&
-      ((await ClassModel.exists({
-        teacherId: currentUser.id,
-        students: query.studentId,
-      })) !== null ||
-        (await AssignmentModel.exists({
-          teacherId: currentUser.id,
-          studentId: query.studentId,
-        })) !== null);
-
-    if (!allowed) {
-      throw new ForbiddenError(
-        "FORBIDDEN",
-        "Bạn chỉ có thể xem tiến độ của học sinh thuộc lớp/bài tập do mình phụ trách."
-      );
-    }
+    throw new ForbiddenError(
+      "FORBIDDEN",
+      "Bạn chỉ có thể xem tiến độ của học sinh thuộc lớp/bài tập do mình phụ trách."
+    );
   }
 
-  const student = await UserModel.findById(studentId).select("targetBand");
+  if (!mongoose.isValidObjectId(studentId)) {
+    throw new BadRequestError(
+      "INVALID_STUDENT_ID",
+      "Mã học sinh không hợp lệ."
+    );
+  }
 
-  if (!student) {
-    throw new NotFoundError("Người dùng không tồn tại.");
+  const student = await UserModel.findById(studentId).select(
+    "fullName email role targetBand"
+  );
+
+  if (!student || student.role !== "student") {
+    throw new NotFoundError("Học sinh không tồn tại.");
   }
 
   const attempts = await AttemptModel.find({
@@ -355,6 +356,11 @@ export async function getStudentProgress(
 
   return {
     studentId,
+    student: {
+      id: student._id.toString(),
+      fullName: student.fullName,
+      email: student.email,
+    },
     targetBand,
     latest,
     deltaFromTarget,

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
 import { ForbiddenError } from "../../common/errors/AppError.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
@@ -131,6 +132,7 @@ describe("Practice Heatmap", () => {
 
   it("throws ForbiddenError when teacher views student from another class", async () => {
     vi.spyOn(ClassModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
 
     await expect(
       getPracticeHeatmap(
@@ -138,6 +140,24 @@ describe("Practice Heatmap", () => {
         { studentId }
       )
     ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("allows a teacher to view a student they assigned directly", async () => {
+    vi.spyOn(ClassModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+    } as never);
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue([]),
+    } as never);
+
+    const result = await getPracticeHeatmap(
+      { id: new mongoose.Types.ObjectId().toHexString(), role: "teacher" },
+      { studentId, from: "2026-10-20", to: "2026-10-20" }
+    );
+
+    expect(result.days).toHaveLength(1);
+    expect(result.days[0].status).toBe("none");
   });
 
   it("calculates both, listening_only, reading_only, and none statuses correctly", async () => {

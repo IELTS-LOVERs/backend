@@ -150,6 +150,7 @@ export const CreateExamSchema = z.object({
     kind: z.enum(["practice", "mock"]).optional(),
     scoringMode: z.enum(["band", "raw"]).optional(),
     bandConversion: BandConversionSchema.optional().nullable(),
+    disableTextSelection: z.boolean().optional(),
     type: z.enum(["practice", "mock"]).optional(), // backwards compat alias
     curriculum: CurriculumSchema.optional().nullable(),
     postSubmissionResources: PostSubmissionResourcesSchema.optional().nullable(),
@@ -171,6 +172,7 @@ export const UpdateExamSchema = z.object({
     kind: z.enum(["practice", "mock"]).optional(),
     scoringMode: z.enum(["band", "raw"]).optional(),
     bandConversion: BandConversionSchema.optional().nullable(),
+    disableTextSelection: z.boolean().optional(),
     type: z.enum(["practice", "mock"]).optional(),
     curriculum: CurriculumSchema.optional().nullable(),
     postSubmissionResources: PostSubmissionResourcesSchema.optional().nullable(),
@@ -192,6 +194,7 @@ export const UpdateExamMetadataSchema = z.object({
     kind: z.enum(["practice", "mock"]).optional(),
     scoringMode: z.enum(["band", "raw"]).optional(),
     bandConversion: BandConversionSchema.optional().nullable(),
+    disableTextSelection: z.boolean().optional(),
     type: z.enum(["practice", "mock"]).optional(),
     curriculum: CurriculumSchema.optional().nullable(),
     postSubmissionResources: PostSubmissionResourcesSchema.optional().nullable(),

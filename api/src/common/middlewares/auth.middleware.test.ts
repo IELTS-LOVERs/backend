@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NextFunction, Request, Response } from "express";
 import { env } from "../../config/env.js";
 import jwt from "jsonwebtoken";
@@ -7,6 +7,12 @@ import { UserModel, type IUser } from "../../modules/users/user.model.js";
 import { signAccessToken, signRefreshToken } from "../../modules/auth/auth.service.js";
 import { authenticate } from "./auth.middleware.js";
 import type { AppError } from "../errors/AppError.js";
+
+const SID = "session-0001";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function makeUser(overrides: Partial<IUser> = {}): IUser {
   return {
@@ -80,10 +86,10 @@ describe("authenticate (FIX-05 / FIX-20)", () => {
     expect(error.statusCode).toBe(401);
   });
 
-  it("accepts a legacy token without a `type` claim during transition", async () => {
-    const user = makeUser();
+  it("accepts a legacy token without a `type` claim for multi-session roles", async () => {
+    const user = makeUser({ role: "teacher" });
     const legacyToken = jwt.sign(
-      { sub: user._id.toString(), role: "student", email: user.email, tokenVersion: 0 },
+      { sub: user._id.toString(), role: "teacher", email: user.email, tokenVersion: 0 },
       env.JWT_ACCESS_SECRET,
       { expiresIn: "1h" }
     );
@@ -95,6 +101,56 @@ describe("authenticate (FIX-05 / FIX-20)", () => {
     await authenticate(req, res, next);
 
     expect(next).toHaveBeenCalledWith();
+  });
+
+  it("accepts a student token whose sid matches the active session", async () => {
+    const user = makeUser({ activeSessionId: SID });
+    vi.spyOn(UserModel, "findById").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue(user),
+    } as never);
+
+    const { req, res, next } = run(signAccessToken(user, SID));
+    await authenticate(req, res, next);
+
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it("asks a student token without sid to refresh (legacy upgrade)", async () => {
+    const user = makeUser({ activeSessionId: SID });
+    const legacyToken = jwt.sign(
+      {
+        sub: user._id.toString(),
+        role: "student",
+        email: user.email,
+        tokenVersion: 0,
+        type: "access",
+      },
+      env.JWT_ACCESS_SECRET,
+      { expiresIn: "1h" }
+    );
+    vi.spyOn(UserModel, "findById").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue(user),
+    } as never);
+
+    const { req, res, next } = run(legacyToken);
+    await authenticate(req, res, next);
+
+    const error = (next as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as AppError;
+    expect(error.errorCode).toBe("SESSION_REQUIRED");
+  });
+
+  it("rejects a student token from an older device with SESSION_REPLACED", async () => {
+    const user = makeUser({ activeSessionId: "new-session" });
+    vi.spyOn(UserModel, "findById").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue(user),
+    } as never);
+
+    const { req, res, next } = run(signAccessToken(user, "old-session"));
+    await authenticate(req, res, next);
+
+    const error = (next as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as AppError;
+    expect(error.errorCode).toBe("SESSION_REPLACED");
+    expect(error.statusCode).toBe(401);
   });
 
   it("rejects a malformed Authorization header before hitting the DB", async () => {

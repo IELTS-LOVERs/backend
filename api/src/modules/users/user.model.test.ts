@@ -14,6 +14,8 @@ describe("UserModel", () => {
     expect(UserModel.schema.path("avatarMediaId")).toBeDefined();
     expect(UserModel.schema.path("status")).toBeDefined();
     expect(UserModel.schema.path("tokenVersion")).toBeDefined();
+    expect(UserModel.schema.path("activeSessionId")).toBeDefined();
+    expect(UserModel.schema.path("refreshSessions")).toBeDefined();
   });
 
   it("requires email, passwordHash, and fullName", async () => {

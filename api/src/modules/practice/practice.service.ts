@@ -1,6 +1,7 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { csvEscape } from "../../common/utils/csv.js";
+import { canStaffViewStudent } from "../../common/utils/student-access.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel, type IAttempt } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
@@ -327,29 +328,20 @@ export async function getPracticeHeatmap(
         "Giáo viên cần truyền studentId để xem biểu đồ luyện tập."
       );
     }
-    if (query.studentId) {
-      if (
-        !mongoose.isValidObjectId(currentUser.id) ||
-        !mongoose.isValidObjectId(query.studentId)
-      ) {
-        throw new ForbiddenError(
-          "FORBIDDEN",
-          "Giáo viên chỉ có quyền xem học sinh thuộc lớp mình quản lý."
-        );
-      }
-      const isMember = await ClassModel.exists({
-        teacherId: new mongoose.Types.ObjectId(currentUser.id),
-        students: new mongoose.Types.ObjectId(query.studentId),
-      });
-      if (!isMember) {
-        throw new ForbiddenError(
-          "FORBIDDEN",
-          "Giáo viên chỉ có quyền xem học sinh thuộc lớp mình quản lý."
-        );
-      }
-      targetStudentId = query.studentId;
+    if (!(await canStaffViewStudent(currentUser, query.studentId))) {
+      throw new ForbiddenError(
+        "FORBIDDEN",
+        "Giáo viên chỉ có quyền xem học sinh thuộc lớp/bài tập do mình phụ trách."
+      );
     }
+    targetStudentId = query.studentId;
   } else if (currentUser.role === "admin" && query.studentId) {
+    if (!mongoose.isValidObjectId(query.studentId)) {
+      throw new BadRequestError(
+        "INVALID_STUDENT_ID",
+        "Mã học sinh không hợp lệ."
+      );
+    }
     targetStudentId = query.studentId;
   }
 

@@ -9,6 +9,7 @@ import {
   type IUser,
   type IRefreshSession,
 } from "../users/user.model.js";
+import { isSingleDeviceRole } from "./auth.policy.js";
 import type { ChangePasswordBody, LoginBody, RegisterBody } from "./auth.validation.js";
 
 const BCRYPT_SALT_ROUNDS = 12;
@@ -57,6 +58,8 @@ export interface AccessTokenPayload {
   email: string;
   tokenVersion?: number;
   type?: "access";
+  /** ID phiên đăng nhập (dùng cho chính sách một thiết bị). */
+  sid?: string;
 }
 
 export interface RefreshTokenPayload {
@@ -65,6 +68,7 @@ export interface RefreshTokenPayload {
   email: string;
   tokenVersion?: number;
   type?: "refresh";
+  sid?: string;
 }
 
 function buildPayload(user: IUser) {
@@ -76,18 +80,22 @@ function buildPayload(user: IUser) {
   };
 }
 
-export function signAccessToken(user: IUser): string {
-  return jwt.sign({ ...buildPayload(user), type: "access" }, env.JWT_ACCESS_SECRET, {
-    expiresIn: env.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions["expiresIn"],
-  });
+export function signAccessToken(user: IUser, sid: string = crypto.randomUUID()): string {
+  return jwt.sign(
+    { ...buildPayload(user), type: "access", sid },
+    env.JWT_ACCESS_SECRET,
+    {
+      expiresIn: env.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions["expiresIn"],
+    }
+  );
 }
 
-export function signRefreshToken(user: IUser): string {
+export function signRefreshToken(user: IUser, sid: string = crypto.randomUUID()): string {
   // `jti` guarantees a fresh token per issuance even when the second-resolution
   // `iat`/`exp` are identical (otherwise rotation within the same second would
   // re-emit the exact same token and the session hash would not change).
   return jwt.sign(
-    { ...buildPayload(user), type: "refresh", jti: crypto.randomUUID() },
+    { ...buildPayload(user), type: "refresh", jti: crypto.randomUUID(), sid },
     env.JWT_REFRESH_SECRET,
     {
       expiresIn: env.JWT_REFRESH_EXPIRES_IN as jwt.SignOptions["expiresIn"],
@@ -95,10 +103,10 @@ export function signRefreshToken(user: IUser): string {
   );
 }
 
-export function generateTokens(user: IUser): AuthTokens {
+export function generateTokens(user: IUser, sid: string = crypto.randomUUID()): AuthTokens {
   return {
-    accessToken: signAccessToken(user),
-    refreshToken: signRefreshToken(user),
+    accessToken: signAccessToken(user, sid),
+    refreshToken: signRefreshToken(user, sid),
   };
 }
 
@@ -108,19 +116,26 @@ export function hashRefreshToken(token: string): string {
 }
 
 /**
- * I-1: rotate a session to a new token hash while remembering the consumed hash
- * (bounded + time-pruned) so a concurrent second refresh can be recognized.
+ * I-1: keeps the hashes consumed by recent rotations (bounded + time-pruned)
+ * so a concurrent second refresh can be recognized as a benign race.
  */
-function rotateSession(session: IRefreshSession, newRefreshToken: string): void {
-  const now = new Date();
-  const consumed = [
+function buildConsumedHashes(
+  session: IRefreshSession,
+  now: Date
+): Array<{ tokenHash: string; rotatedAt: Date }> {
+  return [
     ...(session.consumedTokenHashes ?? []),
     { tokenHash: session.tokenHash, rotatedAt: now },
   ]
     .filter((entry) => now.getTime() - entry.rotatedAt.getTime() < CONSUMED_HASH_RETENTION_MS)
-    .slice(-MAX_CONSUMED_HASHES);
+    .slice(-MAX_CONSUMED_HASHES)
+    .map((entry) => ({ tokenHash: entry.tokenHash, rotatedAt: entry.rotatedAt }));
+}
 
-  session.consumedTokenHashes = consumed;
+/** I-1: rotate a session in memory (used for multi-session roles). */
+function rotateSession(session: IRefreshSession, newRefreshToken: string): void {
+  const now = new Date();
+  session.consumedTokenHashes = buildConsumedHashes(session, now);
   session.tokenHash = hashRefreshToken(newRefreshToken);
 }
 
@@ -130,40 +145,119 @@ function resolveRefreshExpiry(refreshToken: string): Date {
   return new Date(Date.now() + DEFAULT_REFRESH_TTL_MS);
 }
 
+function buildRefreshSession(
+  refreshToken: string,
+  sessionId: string,
+  userAgent?: string,
+  consumedTokenHashes: IRefreshSession["consumedTokenHashes"] = []
+): IRefreshSession {
+  return {
+    sessionId,
+    tokenHash: hashRefreshToken(refreshToken),
+    createdAt: new Date(),
+    expiresAt: resolveRefreshExpiry(refreshToken),
+    ...(userAgent ? { userAgent } : {}),
+    consumedTokenHashes,
+  };
+}
+
 /**
- * Persists a new refresh session (hash only), pruning expired entries and
- * capping the number of concurrent sessions per user.
+ * Persists a new refresh session (hash only).
+ *
+ * - Role bị giới hạn một thiết bị: thay toàn bộ danh sách bằng đúng phiên mới
+ *   và cập nhật `activeSessionId` (last-login-wins).
+ * - Role còn lại: giữ tối đa MAX_REFRESH_SESSIONS phiên như cũ.
  */
 async function persistRefreshSession(
   user: IUser,
   refreshToken: string,
+  sessionId: string,
   userAgent?: string
 ): Promise<void> {
-  const now = new Date();
-  const expiresAt = resolveRefreshExpiry(refreshToken);
+  if (isSingleDeviceRole(user.role)) {
+    // Re-login from the same browser reuses the sid. Carry recent consumed
+    // hashes forward so an in-flight refresh from another tab is still
+    // recognized as a benign race instead of a replay.
+    const previous = (user.refreshSessions ?? []).find(
+      (session) => session.sessionId === sessionId
+    );
+    const consumed = previous ? buildConsumedHashes(previous, new Date()) : [];
+    user.refreshSessions = [
+      buildRefreshSession(refreshToken, sessionId, userAgent, consumed),
+    ];
+    user.activeSessionId = sessionId;
+    await user.save();
+    return;
+  }
 
+  const now = new Date();
   const active = (user.refreshSessions ?? []).filter(
     (session) => session.expiresAt.getTime() > now.getTime()
   );
 
-  active.push({
-    tokenHash: hashRefreshToken(refreshToken),
-    createdAt: now,
-    expiresAt,
-    ...(userAgent ? { userAgent } : {}),
-    consumedTokenHashes: [],
-  });
+  active.push(buildRefreshSession(refreshToken, sessionId, userAgent));
 
   active.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   user.refreshSessions = active.slice(0, MAX_REFRESH_SESSIONS);
   await user.save();
 }
 
-/** Signs a fresh token pair and records the refresh session server-side. */
-export async function issueTokens(user: IUser, userAgent?: string): Promise<AuthTokens> {
-  const tokens = generateTokens(user);
-  await persistRefreshSession(user, tokens.refreshToken, userAgent);
+/**
+ * Signs a fresh token pair and records the refresh session server-side.
+ *
+ * `reuseSessionId` is set when the caller proves it is the same browser/device
+ * that already owns the active session (refresh cookie matches). Reusing the
+ * sid keeps existing tabs on that browser working instead of "kicking" them.
+ */
+export async function issueTokens(
+  user: IUser,
+  userAgent?: string,
+  reuseSessionId?: string
+): Promise<AuthTokens> {
+  const sessionId = reuseSessionId ?? crypto.randomUUID();
+  const tokens = generateTokens(user, sessionId);
+  await persistRefreshSession(user, tokens.refreshToken, sessionId, userAgent);
   return tokens;
+}
+
+/**
+ * Checks whether a refresh token supplied during login belongs to the current
+ * active session. Used to distinguish "same browser, second tab" from a real
+ * second device.
+ */
+function resolveReusableSessionId(
+  user: IUser,
+  presentedRefreshToken?: string
+): string | undefined {
+  if (!presentedRefreshToken || !isSingleDeviceRole(user.role)) return undefined;
+
+  try {
+    const payload = jwt.verify(
+      presentedRefreshToken,
+      env.JWT_REFRESH_SECRET
+    ) as RefreshTokenPayload;
+
+    if (payload.type !== "refresh") return undefined;
+    if (payload.sub !== user._id.toString()) return undefined;
+    if ((payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) return undefined;
+
+    const tokenHash = hashRefreshToken(presentedRefreshToken);
+    const target = (user.refreshSessions ?? []).find(
+      (session) =>
+        session.tokenHash === tokenHash ||
+        (session.consumedTokenHashes ?? []).some(
+          (candidate) => candidate.tokenHash === tokenHash
+        )
+    );
+
+    if (target?.sessionId && target.sessionId === user.activeSessionId) {
+      return target.sessionId;
+    }
+  } catch {
+    // Token không hợp lệ/hết hạn → coi như thiết bị mới.
+  }
+
+  return undefined;
 }
 
 export async function register(
@@ -195,7 +289,8 @@ export async function register(
 
 export async function login(
   data: LoginBody,
-  userAgent?: string
+  userAgent?: string,
+  presentedRefreshToken?: string
 ): Promise<{ user: IUser } & AuthTokens> {
   const user = await UserModel.findOne({ email: data.email.toLowerCase().trim() });
 
@@ -219,7 +314,11 @@ export async function login(
 
   logger.info("auth.login_succeeded", { userId: user._id.toString(), role: user.role });
 
-  const tokens = await issueTokens(user, userAgent);
+  // Same browser / second tab: reuse the active session id so logging in again
+  // does not invalidate the other tabs. A different device has no matching
+  // cookie and gets a fresh sid (last-login-wins).
+  const reuseSessionId = resolveReusableSessionId(user, presentedRefreshToken);
+  const tokens = await issueTokens(user, userAgent, reuseSessionId);
   return { user, ...tokens };
 }
 
@@ -266,6 +365,12 @@ export async function refresh(
   const now = Date.now();
   const tokenHash = hashRefreshToken(refreshToken);
   const sessions = user.refreshSessions ?? [];
+  const enforced = isSingleDeviceRole(user.role);
+  const sessionReplacedError = () =>
+    new UnauthorizedError(
+      "SESSION_REPLACED",
+      "Phiên đăng nhập đã được thay thế bởi thiết bị khác."
+    );
 
   // I-1: locate the session by its CURRENT hash first; the expiry check is a
   // separate, clean 401 (no global revocation).
@@ -275,6 +380,15 @@ export async function refresh(
   const current = sessions.find((entry) => entry.tokenHash === tokenHash);
 
   if (current) {
+    if (
+      enforced &&
+      user.activeSessionId &&
+      current.sessionId &&
+      current.sessionId !== user.activeSessionId
+    ) {
+      logger.warn("auth.refresh_replaced", { userId: payload.sub });
+      throw sessionReplacedError();
+    }
     target = current;
   } else {
     // Not the current hash — it may be a hash consumed by a recent rotation.
@@ -283,6 +397,16 @@ export async function refresh(
         (candidate) => candidate.tokenHash === tokenHash
       );
       if (!consumed) continue;
+
+      if (
+        enforced &&
+        user.activeSessionId &&
+        entry.sessionId &&
+        entry.sessionId !== user.activeSessionId
+      ) {
+        logger.warn("auth.refresh_replaced", { userId: payload.sub });
+        throw sessionReplacedError();
+      }
 
       const age = now - consumed.rotatedAt.getTime();
 
@@ -295,18 +419,29 @@ export async function refresh(
       }
 
       // Genuine replay of a long-consumed token → assume theft and revoke
-      // every session plus outstanding access tokens.
+      // every session plus outstanding access tokens (atomic to avoid
+      // resurrecting a session that another login just created).
       logger.warn("auth.refresh_reuse_detected", { userId: payload.sub, ageMs: age });
-      user.refreshSessions = [];
-      user.tokenVersion = (user.tokenVersion ?? 0) + 1;
-      await user.save();
+      await UserModel.updateOne(
+        { _id: user._id },
+        {
+          $set: { refreshSessions: [] },
+          $inc: { tokenVersion: 1 },
+          $unset: { activeSessionId: 1 },
+        }
+      );
       throw new UnauthorizedError("REFRESH_TOKEN_INVALID", "Refresh Token không hợp lệ.");
     }
   }
 
   if (!target) {
-    // Unknown hash: the session was logged out, pruned (max-session cap) or
-    // simply never existed. Answer cleanly without punishing other devices.
+    // Unknown hash: the session was logged out, pruned (max-session cap),
+    // replaced by another login, or simply never existed. For single-device
+    // roles with a live active session this means "another device logged in".
+    if (enforced && user.activeSessionId) {
+      logger.warn("auth.refresh_replaced", { userId: payload.sub, reason: "unknown_session" });
+      throw sessionReplacedError();
+    }
     logger.warn("auth.refresh_failed", { userId: payload.sub, reason: "unknown_session" });
     throw new UnauthorizedError("REFRESH_TOKEN_INVALID", "Refresh Token không hợp lệ.");
   }
@@ -314,20 +449,95 @@ export async function refresh(
   if (target.expiresAt.getTime() <= now) {
     // The 7-day remember-me window is over. Prune the session; do NOT revoke
     // the user's other (still valid) sessions.
-    user.refreshSessions = sessions.filter((entry) => entry !== target);
-    await user.save();
+    if (enforced) {
+      const pullMatch = target.sessionId
+        ? { sessionId: target.sessionId }
+        : { tokenHash: target.tokenHash };
+      await UserModel.updateOne(
+        { _id: user._id },
+        { $pull: { refreshSessions: pullMatch } }
+      );
+      if (target.sessionId && user.activeSessionId === target.sessionId) {
+        await UserModel.updateOne(
+          { _id: user._id, activeSessionId: target.sessionId },
+          { $unset: { activeSessionId: 1 } }
+        );
+      }
+    } else {
+      user.refreshSessions = sessions.filter((entry) => entry !== target);
+      await user.save();
+    }
     logger.warn("auth.refresh_failed", { userId: payload.sub, reason: "session_expired" });
     throw new UnauthorizedError("REFRESH_TOKEN_INVALID", "Refresh Token không hợp lệ.");
   }
 
-  const newAccessToken = signAccessToken(user);
-  const newRefreshToken = signRefreshToken(user);
+  // Legacy sessions created before the single-device policy have no sessionId.
+  // Adopt them once (this device becomes the active session).
+  if (enforced && !target.sessionId) {
+    if (user.activeSessionId) {
+      logger.warn("auth.refresh_replaced", { userId: payload.sub, reason: "legacy_session" });
+      throw sessionReplacedError();
+    }
+
+    const sessionId = crypto.randomUUID();
+    const newAccessToken = signAccessToken(user, sessionId);
+    const newRefreshToken = signRefreshToken(user, sessionId);
+    const upgraded: IRefreshSession = {
+      sessionId,
+      tokenHash: hashRefreshToken(newRefreshToken),
+      createdAt: target.createdAt,
+      expiresAt: target.expiresAt,
+      ...(target.userAgent ? { userAgent: target.userAgent } : {}),
+      consumedTokenHashes: buildConsumedHashes(target, new Date(now)),
+    };
+
+    const result = await UserModel.updateOne(
+      { _id: user._id, "refreshSessions.tokenHash": target.tokenHash },
+      { $set: { refreshSessions: [upgraded], activeSessionId: sessionId } }
+    );
+    if (result.matchedCount === 0) {
+      throw sessionReplacedError();
+    }
+
+    logger.info("auth.refresh_legacy_upgraded", { userId: payload.sub });
+    void userAgent;
+    return { accessToken: newAccessToken, refreshToken: newRefreshToken };
+  }
+
+  const sessionId = target.sessionId ?? crypto.randomUUID();
+  if (!target.sessionId) target.sessionId = sessionId;
+  const newAccessToken = signAccessToken(user, sessionId);
+  const newRefreshToken = signRefreshToken(user, sessionId);
 
   // Rotate in place, preserving the original session's createdAt/expiresAt so
   // the 7-day "remember me" window does not slide forward on every refresh.
-  rotateSession(target, newRefreshToken);
-  user.refreshSessions = sessions.filter((entry) => entry.expiresAt.getTime() > now);
-  await user.save();
+  if (enforced) {
+    // Atomic conditional update: if another device logged in between our read
+    // and this write, the filter no longer matches and we must NOT overwrite
+    // the newer session.
+    const consumed = buildConsumedHashes(target, new Date(now));
+    const result = await UserModel.updateOne(
+      {
+        _id: user._id,
+        activeSessionId: sessionId,
+        "refreshSessions.sessionId": sessionId,
+      },
+      {
+        $set: {
+          "refreshSessions.$.tokenHash": hashRefreshToken(newRefreshToken),
+          "refreshSessions.$.consumedTokenHashes": consumed,
+        },
+      }
+    );
+    if (result.matchedCount === 0) {
+      logger.warn("auth.refresh_replaced", { userId: payload.sub, reason: "concurrent_login" });
+      throw sessionReplacedError();
+    }
+  } else {
+    rotateSession(target, newRefreshToken);
+    user.refreshSessions = sessions.filter((entry) => entry.expiresAt.getTime() > now);
+    await user.save();
+  }
 
   if (benignRace) {
     logger.info("auth.refresh_concurrent_race", { userId: payload.sub });
@@ -357,13 +567,18 @@ export async function logout(refreshToken?: string): Promise<void> {
   if (!user) return;
 
   const tokenHash = hashRefreshToken(refreshToken);
-  const sessions: IRefreshSession[] = user.refreshSessions ?? [];
-  const remaining = sessions.filter((entry) => entry.tokenHash !== tokenHash);
+  const target = (user.refreshSessions ?? []).find((entry) => entry.tokenHash === tokenHash);
+  const sessionId = target?.sessionId ?? payload.sid;
 
-  if (remaining.length !== sessions.length) {
-    user.refreshSessions = remaining;
-    await user.save();
+  // Atomic pull so a slow logout from the old device can never clear the
+  // session that a newer login just created.
+  const update: Record<string, unknown> = {
+    $pull: { refreshSessions: { tokenHash } },
+  };
+  if (sessionId && user.activeSessionId === sessionId) {
+    update.$unset = { activeSessionId: 1 };
   }
+  await UserModel.updateOne({ _id: user._id }, update);
 
   logger.info("auth.logout", { userId: payload.sub });
 }
@@ -388,6 +603,7 @@ export async function changePassword(
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
   // Password change invalidates every refresh session (all devices).
   user.refreshSessions = [];
+  user.activeSessionId = undefined;
   await user.save();
 
   logger.info("auth.password_changed", { userId });

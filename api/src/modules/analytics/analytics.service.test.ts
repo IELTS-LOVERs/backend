@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
 import { ForbiddenError } from "../../common/errors/AppError.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
@@ -156,7 +157,13 @@ describe("getStudentProgress", () => {
 
   it("forces the authenticated student id and computes delta against targetBand", async () => {
     vi.spyOn(UserModel, "findById").mockReturnValueOnce({
-      select: vi.fn().mockResolvedValue({ targetBand: 7 }),
+      select: vi.fn().mockResolvedValue({
+        _id: studentId,
+        fullName: "Student One",
+        email: "s1@test.com",
+        role: "student",
+        targetBand: 7,
+      }),
     } as never);
     vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
       populate: vi.fn().mockReturnValue({
@@ -185,10 +192,57 @@ describe("getStudentProgress", () => {
     );
 
     expect(result.studentId).toBe(studentId);
+    expect(result.student).toEqual({
+      id: studentId,
+      fullName: "Student One",
+      email: "s1@test.com",
+    });
     expect(result.latest.overall).toBe(6.5);
     expect(result.latest.listening).toBe(6);
     expect(result.latest.reading).toBe(7);
     expect(result.deltaFromTarget).toBe(-0.5);
     expect(result.points).toHaveLength(2);
+  });
+
+  it("lets a teacher view a student they assigned directly", async () => {
+    const teacherId = new mongoose.Types.ObjectId().toString();
+    vi.spyOn(ClassModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+    } as never);
+    vi.spyOn(UserModel, "findById").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue({
+        _id: studentId,
+        fullName: "Assigned Student",
+        email: "assigned@test.com",
+        role: "student",
+        targetBand: 6.5,
+      }),
+    } as never);
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      populate: vi.fn().mockReturnValue({
+        sort: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue([]),
+        }),
+      }),
+    } as never);
+
+    const result = await getStudentProgress(
+      { id: teacherId, role: "teacher" },
+      { studentId }
+    );
+
+    expect(result.student.fullName).toBe("Assigned Student");
+    expect(result.points).toHaveLength(0);
+  });
+
+  it("rejects a teacher who does not teach the student", async () => {
+    const teacherId = new mongoose.Types.ObjectId().toString();
+    vi.spyOn(ClassModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+
+    await expect(
+      getStudentProgress({ id: teacherId, role: "teacher" }, { studentId })
+    ).rejects.toThrow(ForbiddenError);
   });
 });

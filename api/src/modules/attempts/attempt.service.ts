@@ -80,6 +80,7 @@ export interface CandidateExam {
   title: string;
   kind: ExamKind;
   scoringMode?: "band" | "raw";
+  disableTextSelection?: boolean;
   sections: CandidateExamSection[];
 }
 
@@ -459,6 +460,7 @@ export function buildCandidateExam(
     kind: (exam.kind ?? "mock") as ExamKind,
     scoringMode:
       exam.scoringMode ?? (exam.kind === "practice" ? "raw" : "band"),
+    disableTextSelection: exam.disableTextSelection ?? false,
     sections: (examObj.sections ?? []).map((section) => {
       const sectionMedia = (section.mediaIds ?? [])
         .map((item) => toCandidateMediaItem(item, urlMap))

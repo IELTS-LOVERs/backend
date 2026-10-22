@@ -82,8 +82,15 @@ export interface StudentProgressPoint {
   overall: number | null;
 }
 
+export interface StudentProgressStudent {
+  id: string;
+  fullName: string;
+  email: string;
+}
+
 export interface StudentProgress {
   studentId: string;
+  student: StudentProgressStudent;
   targetBand: number | null;
   latest: ClassSkillAverages;
   deltaFromTarget: number | null;

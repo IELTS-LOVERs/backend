@@ -12,6 +12,12 @@ export interface IConsumedRefreshHash {
 }
 
 export interface IRefreshSession {
+  /**
+   * ID của phiên, được nhúng vào access/refresh token. Với role bị giới hạn
+   * một thiết bị, `User.activeSessionId` phải khớp với giá trị này.
+   * Optional để tương thích các session cũ trước khi bật chính sách.
+   */
+  sessionId?: string;
   tokenHash: string;
   createdAt: Date;
   expiresAt: Date;
@@ -37,6 +43,11 @@ export interface IUser extends mongoose.Document {
   tokenVersion: number;
   /** FIX-04: server-side refresh sessions (hashed tokens) for rotation/revocation. */
   refreshSessions: IRefreshSession[];
+  /**
+   * Session đang hoạt động của các role bị giới hạn một thiết bị (mặc định
+   * student). Access token có `sid` khác giá trị này sẽ bị từ chối ngay.
+   */
+  activeSessionId?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,6 +62,7 @@ const ConsumedRefreshHashSchema = new Schema<IConsumedRefreshHash>(
 
 const RefreshSessionSchema = new Schema<IRefreshSession>(
   {
+    sessionId: { type: String },
     tokenHash: { type: String, required: true },
     createdAt: { type: Date, default: Date.now },
     expiresAt: { type: Date, required: true },
@@ -72,6 +84,7 @@ const UserSchema = new Schema<IUser>(
     status: { type: String, enum: ["active", "inactive", "suspended"], default: "active" },
     tokenVersion: { type: Number, default: 0 },
     refreshSessions: { type: [RefreshSessionSchema], default: [] },
+    activeSessionId: { type: String },
   },
   { timestamps: true, versionKey: false }
 );

@@ -64,3 +64,9 @@ export async function updateUserStatus(req: Request, res: Response): Promise<voi
   const user = await userService.updateUserStatus(userId, body.status);
   sendSuccess(res, toSafeUser(user));
 }
+
+export async function revokeSessions(req: Request, res: Response): Promise<void> {
+  const userId = req.params.id as string;
+  await userService.revokeSessions(userId);
+  sendSuccess(res, { message: "Đã đăng xuất người dùng khỏi mọi thiết bị" });
+}

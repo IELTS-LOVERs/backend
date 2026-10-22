@@ -98,6 +98,8 @@ export interface IExam extends mongoose.Document {
   kind: ExamKind;
   scoringMode: ExamScoringMode;
   bandConversion?: IBandConversion;
+  /** When true candidates cannot select / highlight exam text. */
+  disableTextSelection?: boolean;
   curriculum?: IExamCurriculum;
   postSubmissionResources?: IExamPostSubmissionResources;
   durationMinutes: number;
@@ -192,6 +194,10 @@ const ExamSchema = new Schema<IExam>(
     bandConversion: {
       type: BandConversionSchema,
       default: undefined,
+    },
+    disableTextSelection: {
+      type: Boolean,
+      default: false,
     },
     curriculum: {
       collectionName: { type: String, trim: true, maxlength: 120 },

@@ -3,7 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { UserModel, type IUser } from "./user.model.js";
 import { toSafeUser } from "./user.serializer.js";
-import { createUser, listUsers, updateProfile, updateUserStatus } from "./user.service.js";
+import {
+  createUser,
+  listUsers,
+  revokeSessions,
+  updateProfile,
+  updateUserStatus,
+} from "./user.service.js";
 
 describe("toSafeUser", () => {
   it("serializes user document to safe user payload without passwordHash", () => {
@@ -202,6 +208,7 @@ describe("admin user management", () => {
       _id: userId,
       status: "active",
       tokenVersion: 2,
+      activeSessionId: "session-1",
       refreshSessions: [
         { tokenHash: "abc", createdAt: new Date(), expiresAt: new Date(Date.now() + 1000) },
       ],
@@ -214,11 +221,40 @@ describe("admin user management", () => {
     expect(doc.status).toBe("suspended");
     expect(doc.tokenVersion).toBe(3);
     expect(doc.refreshSessions).toEqual([]);
+    expect(doc.activeSessionId).toBeUndefined();
   });
 
   it("throws NotFoundError when updating a missing user", async () => {
     vi.spyOn(UserModel, "findById").mockResolvedValueOnce(null as never);
 
     await expect(updateUserStatus("missing", "active")).rejects.toThrow(NotFoundError);
+  });
+
+  it("revokes every session and bumps tokenVersion when admin logs the user out", async () => {
+    const userId = new mongoose.Types.ObjectId();
+    const doc = {
+      _id: userId,
+      status: "active",
+      tokenVersion: 4,
+      activeSessionId: "session-1",
+      refreshSessions: [
+        { tokenHash: "abc", createdAt: new Date(), expiresAt: new Date(Date.now() + 1000) },
+      ],
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(UserModel, "findById").mockResolvedValueOnce(doc as never);
+
+    await revokeSessions(userId.toString());
+
+    expect(doc.refreshSessions).toEqual([]);
+    expect(doc.activeSessionId).toBeUndefined();
+    expect(doc.tokenVersion).toBe(5);
+    expect(doc.save).toHaveBeenCalled();
+  });
+
+  it("throws NotFoundError when revoking sessions of a missing user", async () => {
+    vi.spyOn(UserModel, "findById").mockResolvedValueOnce(null as never);
+
+    await expect(revokeSessions("missing")).rejects.toThrow(NotFoundError);
   });
 });

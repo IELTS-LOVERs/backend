@@ -80,6 +80,22 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET là bắt buộc"),
   JWT_REFRESH_EXPIRES_IN: z.string().min(1).default("7d"),
 
+  /**
+   * Danh sách role chỉ được phép có MỘT phiên đăng nhập tại một thời điểm
+   * (last-login-wins: thiết bị mới đăng nhập sẽ đẩy thiết bị cũ ra).
+   * Ví dụ: "student" hoặc "student,teacher". Chuỗi rỗng = tắt chính sách.
+   */
+  SINGLE_DEVICE_ROLES: z
+    .string()
+    .default("student")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((role) => role.trim())
+        .filter((role) => role.length > 0)
+    )
+    .pipe(z.array(z.enum(["student", "teacher", "admin"]))),
+
   MINIO_ENDPOINT: z.string().min(1, "MINIO_ENDPOINT là bắt buộc"),
   MINIO_PORT: z.coerce.number().int().positive().default(9000),
   MINIO_USE_SSL: booleanFromString("false"),

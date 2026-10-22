@@ -61,6 +61,7 @@ export interface ExamSummary {
   kind: ExamKind;
   scoringMode: ExamScoringMode;
   bandConversion?: IBandConversion;
+  disableTextSelection?: boolean;
   curriculum?: IExamCurriculum;
   sectionsCount: number;
   type?: ExamKind;
@@ -123,6 +124,7 @@ export interface ExamDetail {
   kind: ExamKind;
   scoringMode: ExamScoringMode;
   bandConversion?: IBandConversion;
+  disableTextSelection: boolean;
   bandConversionDefaults?: {
     listening: Array<{ minRaw: number; band: number }>;
     readingAcademic: Array<{ minRaw: number; band: number }>;
@@ -376,6 +378,7 @@ export async function create(data: CreateExamBody, userId: string): Promise<Exam
     kind,
     scoringMode,
     bandConversion,
+    disableTextSelection: data.disableTextSelection ?? false,
     curriculum: mapCurriculumInput(data.curriculum),
     postSubmissionResources: mapResourcesInput(data.postSubmissionResources),
     durationMinutes: data.durationMinutes,
@@ -394,6 +397,7 @@ export async function create(data: CreateExamBody, userId: string): Promise<Exam
     kind: exam.kind,
     scoringMode: exam.scoringMode,
     bandConversion: exam.bandConversion,
+    disableTextSelection: exam.disableTextSelection ?? false,
     curriculum: exam.curriculum,
     sectionsCount: exam.sections.length,
     type: exam.kind,
@@ -538,6 +542,7 @@ export async function getById(
         ? "raw"
         : exam.scoringMode ?? "band",
     bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
+    disableTextSelection: exam.disableTextSelection ?? false,
     bandConversionDefaults: {
       listening: defaultThresholdsForSkill("listening"),
       readingAcademic: defaultThresholdsForSkill("reading", "academic"),
@@ -584,6 +589,9 @@ export async function update(
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
   if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (data.disableTextSelection !== undefined) {
+    exam.disableTextSelection = data.disableTextSelection;
+  }
   if (
     data.scoringMode !== undefined ||
     data.bandConversion !== undefined ||
@@ -657,6 +665,9 @@ export async function updateMetadata(
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
   if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (data.disableTextSelection !== undefined) {
+    exam.disableTextSelection = data.disableTextSelection;
+  }
   if (
     data.scoringMode !== undefined ||
     data.bandConversion !== undefined ||
@@ -779,6 +790,7 @@ export async function clone(
       clonedKind === "mock" && clonedScoringMode === "band"
         ? normalizeBandConversion(original.bandConversion)
         : undefined,
+    disableTextSelection: original.disableTextSelection ?? false,
     curriculum: original.curriculum,
     postSubmissionResources: original.postSubmissionResources,
     durationMinutes: original.durationMinutes,
