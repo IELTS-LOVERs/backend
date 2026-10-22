@@ -76,23 +76,26 @@ export async function createPresignedUpload(
 ): Promise<PresignedUploadResult> {
   const key = buildMediaObjectKey(data.type, data.filename);
 
-  const media = await MediaModel.create({
-    bucket: env.MINIO_BUCKET,
-    key,
-    originalName: data.filename,
-    mimeType: data.mimeType,
-    size: data.size,
-    type: data.type,
-    uploadedBy: new mongoose.Types.ObjectId(userId),
-  });
-
-  // I-2: the upload URL is used by the BROWSER, so it must be signed against
-  // the client-reachable endpoint (minioPresignClient), not the internal one.
-  const uploadUrl = await minioPresignClient.presignedPutObject(
-    env.MINIO_BUCKET,
-    key,
-    PRESIGN_EXPIRES_IN_SECONDS
-  );
+  // The DB insert and URL signing are independent. Running them together saves
+  // one round-trip before the browser can start the actual file upload.
+  const [media, uploadUrl] = await Promise.all([
+    MediaModel.create({
+      bucket: env.MINIO_BUCKET,
+      key,
+      originalName: data.filename,
+      mimeType: data.mimeType,
+      size: data.size,
+      type: data.type,
+      uploadedBy: new mongoose.Types.ObjectId(userId),
+    }),
+    // I-2: the upload URL is used by the BROWSER, so it must be signed against
+    // the client-reachable endpoint (minioPresignClient), not the internal one.
+    minioPresignClient.presignedPutObject(
+      env.MINIO_BUCKET,
+      key,
+      PRESIGN_EXPIRES_IN_SECONDS
+    ),
+  ]);
 
   logger.info("media.presigned", { mediaId: media._id.toString(), userId, key });
 
