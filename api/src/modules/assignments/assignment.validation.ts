@@ -46,6 +46,8 @@ export const ListAssignmentsQuerySchema = z.object({
   query: z.object({
     classId: z.string().optional(),
     examId: z.string().optional(),
+    kind: z.enum(["practice", "mock"]).optional(),
+    type: z.enum(["practice", "exam", "mock"]).optional(),
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(100).default(20),
   }),
@@ -53,13 +55,15 @@ export const ListAssignmentsQuerySchema = z.object({
 
 export type ListAssignmentsQuery = z.infer<typeof ListAssignmentsQuerySchema>["query"];
 
-// REQ-001: học sinh lọc bài tập của mình theo lớp và trạng thái nộp.
+// REQ-001: học sinh lọc bài tập của mình theo lớp, trạng thái nộp, và loại bài (luyện tập / đề thi).
 export const MyAssignmentsQuerySchema = z.object({
   query: z.object({
     classId: z.string().min(1).optional(),
     status: z
       .enum(["all", "not_started", "in_progress", "submitted", "expired"])
       .optional(),
+    kind: z.enum(["practice", "mock"]).optional(),
+    type: z.enum(["practice", "exam", "mock"]).optional(),
   }),
 });
 

@@ -1,7 +1,15 @@
 import mongoose, { type Types } from "mongoose";
-import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import {
+  BadRequestError,
+  ForbiddenError,
+  NotFoundError,
+} from "../../common/errors/AppError.js";
 import { logger } from "../../common/utils/logger.js";
-import { AssignmentModel } from "../assignments/assignment.model.js";
+import {
+  defaultThresholdsForSkill,
+  normalizeBandConversion,
+  validateBandConversion,
+} from "../../common/utils/band-conversion.js";
 import {
   buildCandidateExam,
   examMediaPresignTtl,
@@ -13,31 +21,49 @@ import {
   type CandidateMediaItem,
 } from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
-import { ClassModel } from "../classes/class.model.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
 import {
   ExamModel,
   type ExamStatus,
+  type ExamKind,
+  type ExamScoringMode,
+  type IBandConversion,
+  type IExamCurriculum,
+  type IExamPostSubmissionResources,
   type IExam,
   type IExamSection,
   type IQuestionGroup,
   type IQuestionItem,
 } from "./exam.model.js";
+import { canStudentAccessExam, getAssignedExamIds } from "./exam.access.js";
 import type {
+  BandConversionInput,
   CreateExamBody,
+  CurriculumInput,
   ExamSectionInput,
+  PostSubmissionResourcesInput,
   QuestionGroupInput,
   QuestionItemInput,
   UpdateExamBody,
+  UpdateExamCurriculumBody,
   UpdateExamMetadataBody,
+  UpdateExamResourcesBody,
 } from "./exam.validation.js";
+
+export { canStudentAccessExam, getAssignedExamIds };
 
 export interface ExamSummary {
   id: string;
   title: string;
   durationMinutes: number;
   status: ExamStatus;
+  kind: ExamKind;
+  scoringMode: ExamScoringMode;
+  bandConversion?: IBandConversion;
+  curriculum?: IExamCurriculum;
   sectionsCount: number;
+  type?: ExamKind;
 }
 
 export interface ExamListItem {
@@ -45,7 +71,13 @@ export interface ExamListItem {
   title: string;
   durationMinutes: number;
   status: ExamStatus;
+  kind: ExamKind;
+  scoringMode: ExamScoringMode;
+  bandConversion?: IBandConversion;
+  curriculum?: IExamCurriculum;
+  sectionsCount: number;
   createdAt: Date;
+  type?: ExamKind;
 }
 
 export interface SerializedQuestionItem {
@@ -85,33 +117,64 @@ export interface ExamDetail {
   id: string;
   title: string;
   description: string | null;
+  bannerUrl?: string | null;
   durationMinutes: number;
   status: ExamStatus;
+  kind: ExamKind;
+  scoringMode: ExamScoringMode;
+  bandConversion?: IBandConversion;
+  bandConversionDefaults?: {
+    listening: Array<{ minRaw: number; band: number }>;
+    readingAcademic: Array<{ minRaw: number; band: number }>;
+    readingGeneral: Array<{ minRaw: number; band: number }>;
+  };
+  curriculum?: IExamCurriculum;
+  postSubmissionResources?: IExamPostSubmissionResources;
   openAt: Date | null;
   closeAt: Date | null;
   sections: ExamSectionDetail[];
+  type?: ExamKind;
 }
 
 export interface StudentExamDetail extends CandidateExam {
   durationMinutes: number;
   status: ExamStatus;
+  kind: ExamKind;
+  scoringMode?: ExamScoringMode;
+  bandConversion?: IBandConversion;
+  curriculum?: IExamCurriculum;
+  type?: ExamKind;
 }
 
 export interface ListExamsFilters {
   status?: ExamStatus;
+  kind?: ExamKind;
+  type?: ExamKind;
   page: number;
   limit: number;
 }
 
 interface ExamFilter {
   status?: ExamStatus;
+  kind?: ExamKind | { $in: Array<ExamKind | null> };
   createdBy?: string;
   _id?: { $in: Types.ObjectId[] };
 }
 
+/**
+ * Legacy exams were created before `kind` existed. In Mongo, `null` inside
+ * `$in` also matches missing fields, so mock filters must include both
+ * `"mock"` and `null` during/after migration.
+ */
+export function examKindFilter(
+  kind: ExamKind
+): ExamKind | { $in: Array<ExamKind | null> } {
+  return kind === "mock" ? { $in: ["mock", null] } : "practice";
+}
+
 export function getDefaultSectionTitle(skill: SkillType, part: number): string {
-  if (skill === 'reading') return `Passage ${part}`;
-  if (skill === 'writing') return `Task ${part}`;
+  if (skill === "reading") return `Passage ${part}`;
+  if (skill === "writing") return `Task ${part}`;
   return `Part ${part}`;
 }
 
@@ -204,8 +267,6 @@ function serializeQuestionGroup(
   group: IQuestionGroup,
   mediaUrlMap?: Map<string, string>
 ): SerializedQuestionGroup {
-  // Group-level image (config.imageMediaId) — resolve the presigned URL for the
-  // teacher UI (preview/editor thumbnail). The raw id stays in `config`.
   const imageId = getGroupConfigImageId(group);
   const imageUrl = imageId ? mediaUrlMap?.get(imageId) : undefined;
   const media: CandidateMediaItem[] =
@@ -246,10 +307,77 @@ async function findOwnedExam(id: string, userId: string, role: string): Promise<
   return exam;
 }
 
+function mapCurriculumInput(curriculum?: CurriculumInput | null): IExamCurriculum | undefined {
+  if (!curriculum) return undefined;
+  return {
+    collectionName: curriculum.collectionName ?? undefined,
+    testNumber: curriculum.testNumber ?? undefined,
+    part: curriculum.part ?? curriculum.partOrPassage ?? undefined,
+    orderIndex: curriculum.orderIndex ?? undefined,
+  };
+}
+
+function mapResourcesInput(resources?: PostSubmissionResourcesInput | null): IExamPostSubmissionResources | undefined {
+  if (!resources) return undefined;
+  return {
+    solutionVideoUrl: resources.solutionVideoUrl ?? undefined,
+    solutionDocumentUrl: resources.solutionDocumentUrl ?? undefined,
+    solutionNotes: resources.solutionNotes ?? undefined,
+    vocabularyItems: (resources.vocabularyItems ?? []).map((v) => ({
+      word: v.word,
+      phonetic: v.phonetic ?? undefined,
+      meaning: v.meaning,
+      contextSentence: v.contextSentence ?? undefined,
+    })),
+  };
+}
+
+function mapBandConversionInput(
+  input?: BandConversionInput | null
+): IBandConversion | undefined {
+  if (!input) return undefined;
+  const config = normalizeBandConversion(input);
+  const issues = validateBandConversion(config);
+  if (issues.length > 0) {
+    throw new BadRequestError("EXAM_BAND_CONVERSION_INVALID", issues.join(" "));
+  }
+  return config;
+}
+
+function sameBandConversion(
+  a?: IBandConversion | null,
+  b?: IBandConversion | null
+): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+export function resolveExamBandConversion(
+  kind: ExamKind,
+  scoringMode: ExamScoringMode,
+  config?: IBandConversion | null
+): IBandConversion | undefined {
+  if (kind === "practice" || scoringMode === "raw") return undefined;
+  return normalizeBandConversion(config);
+}
+
 export async function create(data: CreateExamBody, userId: string): Promise<ExamSummary> {
+  const kind = data.kind ?? data.type ?? "mock";
+  const scoringMode: ExamScoringMode =
+    kind === "practice" ? "raw" : data.scoringMode ?? "band";
+  const bandConversion =
+    kind === "mock" && scoringMode === "band"
+      ? mapBandConversionInput(data.bandConversion) ?? normalizeBandConversion()
+      : undefined;
+
   const exam = await ExamModel.create({
     title: data.title,
     description: data.description ?? undefined,
+    bannerUrl: data.bannerUrl ?? undefined,
+    kind,
+    scoringMode,
+    bandConversion,
+    curriculum: mapCurriculumInput(data.curriculum),
+    postSubmissionResources: mapResourcesInput(data.postSubmissionResources),
     durationMinutes: data.durationMinutes,
     sections: mapSections(data.sections),
     status: "draft",
@@ -263,20 +391,13 @@ export async function create(data: CreateExamBody, userId: string): Promise<Exam
     title: exam.title,
     durationMinutes: exam.durationMinutes,
     status: exam.status,
+    kind: exam.kind,
+    scoringMode: exam.scoringMode,
+    bandConversion: exam.bandConversion,
+    curriculum: exam.curriculum,
     sectionsCount: exam.sections.length,
+    type: exam.kind,
   };
-}
-
-export async function getAssignedExamIds(studentId: string): Promise<Types.ObjectId[]> {
-  const classes = await ClassModel.find({ students: studentId }).select("_id");
-  const classIds = classes.map((cls) => cls._id);
-
-  const assignments = await AssignmentModel.find({
-    status: "active",
-    $or: [{ classId: { $in: classIds } }, { studentId }],
-  }).select("examId");
-
-  return assignments.map((assignment) => assignment.examId);
 }
 
 export async function list(
@@ -290,15 +411,18 @@ export async function list(
   total: number;
   totalPages: number;
 }> {
-  const { status, page, limit } = filters;
+  const { status, kind, type, page, limit } = filters;
+  const requestedKind = kind ?? type;
   const query: ExamFilter = {};
 
   if (role === "student") {
     query.status = "published";
     query._id = { $in: await getAssignedExamIds(userId) };
+    if (requestedKind) query.kind = examKindFilter(requestedKind);
   } else {
     if (role !== "admin") query.createdBy = userId;
     if (status) query.status = status;
+    if (requestedKind) query.kind = examKindFilter(requestedKind);
   }
 
   const [exams, total] = await Promise.all([
@@ -315,7 +439,16 @@ export async function list(
       title: exam.title,
       durationMinutes: exam.durationMinutes,
       status: exam.status,
+      kind: exam.kind ?? "mock",
+      scoringMode:
+        (exam.kind ?? "mock") === "practice"
+          ? "raw"
+          : exam.scoringMode ?? "band",
+      bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
+      curriculum: exam.curriculum,
+      sectionsCount: exam.sections?.length ?? 0,
       createdAt: exam.createdAt,
+      type: exam.kind ?? "mock",
     })),
     page,
     limit,
@@ -343,14 +476,26 @@ export async function getById(
   );
 
   if (role === "student") {
-    if (exam.status === "draft") {
-      throw new ForbiddenError("FORBIDDEN", "Học sinh chỉ có thể xem đề thi đã xuất bản.");
+    const allowed = await canStudentAccessExam(userId!, exam);
+    if (!allowed) {
+      throw new ForbiddenError(
+        "FORBIDDEN",
+        "Học sinh không có quyền truy cập đề thi này."
+      );
     }
 
     return {
       ...buildCandidateExam(exam, mediaUrlMap),
       durationMinutes: exam.durationMinutes,
       status: exam.status,
+      kind: exam.kind ?? "mock",
+      scoringMode:
+        (exam.kind ?? "mock") === "practice"
+          ? "raw"
+          : exam.scoringMode ?? "band",
+      bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
+      curriculum: exam.curriculum,
+      type: exam.kind ?? "mock",
     };
   }
 
@@ -384,11 +529,26 @@ export async function getById(
     id: exam._id.toString(),
     title: exam.title,
     description: exam.description ?? null,
+    bannerUrl: exam.bannerUrl ?? null,
     durationMinutes: exam.durationMinutes,
     status: exam.status,
+    kind: exam.kind ?? "mock",
+    scoringMode:
+      (exam.kind ?? "mock") === "practice"
+        ? "raw"
+        : exam.scoringMode ?? "band",
+    bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
+    bandConversionDefaults: {
+      listening: defaultThresholdsForSkill("listening"),
+      readingAcademic: defaultThresholdsForSkill("reading", "academic"),
+      readingGeneral: defaultThresholdsForSkill("reading", "general"),
+    },
+    curriculum: exam.curriculum,
+    postSubmissionResources: exam.postSubmissionResources,
     openAt: exam.openAt ?? null,
     closeAt: exam.closeAt ?? null,
     sections,
+    type: exam.kind ?? "mock",
   };
 }
 
@@ -407,8 +567,56 @@ export async function update(
     );
   }
 
+  const newKind = data.kind ?? data.type;
+  if (newKind !== undefined && newKind !== exam.kind) {
+    const [hasAssignment, hasAttempt] = await Promise.all([
+      AssignmentModel.exists({ examId: exam._id }),
+      AttemptModel.exists({ examId: exam._id }),
+    ]);
+    if (hasAssignment || hasAttempt) {
+      throw new BadRequestError(
+        "EXAM_KIND_IMMUTABLE",
+        "Không thể thay đổi loại đề thi sau khi đã có bài tập hoặc lượt làm bài."
+      );
+    }
+    exam.kind = newKind;
+  }
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
+  if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (
+    data.scoringMode !== undefined ||
+    data.bandConversion !== undefined ||
+    (newKind !== undefined && newKind !== exam.kind)
+  ) {
+    const nextKind = newKind ?? exam.kind;
+    const nextScoringMode: ExamScoringMode =
+      nextKind === "practice" ? "raw" : data.scoringMode ?? exam.scoringMode ?? "band";
+    const nextBandConversion =
+      nextKind === "mock" && nextScoringMode === "band"
+        ? data.bandConversion !== undefined
+          ? mapBandConversionInput(data.bandConversion) ?? normalizeBandConversion()
+          : normalizeBandConversion(exam.bandConversion)
+        : undefined;
+    const scoringConfigChanged =
+      nextScoringMode !== exam.scoringMode ||
+      !sameBandConversion(nextBandConversion, exam.bandConversion);
+
+    if (scoringConfigChanged) {
+      const hasAttempt = await AttemptModel.exists({ examId: exam._id });
+      if (hasAttempt) {
+        throw new BadRequestError(
+          "EXAM_SCORING_MODE_IMMUTABLE",
+          "Không thể thay đổi cách chấm điểm sau khi đã có lượt làm bài."
+        );
+      }
+    }
+
+    exam.scoringMode = nextScoringMode;
+    exam.bandConversion = nextBandConversion;
+  }
+  if (data.curriculum !== undefined) exam.curriculum = mapCurriculumInput(data.curriculum);
+  if (data.postSubmissionResources !== undefined) exam.postSubmissionResources = mapResourcesInput(data.postSubmissionResources);
   if (data.durationMinutes !== undefined) exam.durationMinutes = data.durationMinutes;
   if (data.sections !== undefined) exam.sections = mapSections(data.sections);
   if (data.openAt !== undefined) exam.openAt = data.openAt ? new Date(data.openAt) : undefined;
@@ -426,12 +634,110 @@ export async function updateMetadata(
 ): Promise<void> {
   const exam = await findOwnedExam(id, userId, role);
 
+  const newKind = data.kind ?? data.type;
+  if (newKind !== undefined && newKind !== exam.kind) {
+    if (exam.status !== "draft") {
+      throw new BadRequestError(
+        "EXAM_KIND_IMMUTABLE",
+        "Không thể thay đổi loại đề thi sau khi đã xuất bản."
+      );
+    }
+    const [hasAssignment, hasAttempt] = await Promise.all([
+      AssignmentModel.exists({ examId: exam._id }),
+      AttemptModel.exists({ examId: exam._id }),
+    ]);
+    if (hasAssignment || hasAttempt) {
+      throw new BadRequestError(
+        "EXAM_KIND_IMMUTABLE",
+        "Không thể thay đổi loại đề thi sau khi đã có bài tập hoặc lượt làm bài."
+      );
+    }
+    exam.kind = newKind;
+  }
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
+  if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (
+    data.scoringMode !== undefined ||
+    data.bandConversion !== undefined ||
+    (newKind !== undefined && newKind !== exam.kind)
+  ) {
+    const nextKind = newKind ?? exam.kind;
+    const nextScoringMode: ExamScoringMode =
+      nextKind === "practice" ? "raw" : data.scoringMode ?? exam.scoringMode ?? "band";
+    const nextBandConversion =
+      nextKind === "mock" && nextScoringMode === "band"
+        ? data.bandConversion !== undefined
+          ? mapBandConversionInput(data.bandConversion) ?? normalizeBandConversion()
+          : normalizeBandConversion(exam.bandConversion)
+        : undefined;
+    const scoringConfigChanged =
+      nextScoringMode !== exam.scoringMode ||
+      !sameBandConversion(nextBandConversion, exam.bandConversion);
+
+    if (scoringConfigChanged) {
+      const hasAttempt = await AttemptModel.exists({ examId: exam._id });
+      if (hasAttempt) {
+        throw new BadRequestError(
+          "EXAM_SCORING_MODE_IMMUTABLE",
+          "Không thể thay đổi cách chấm điểm sau khi đã có lượt làm bài."
+        );
+      }
+    }
+
+    exam.scoringMode = nextScoringMode;
+    exam.bandConversion = nextBandConversion;
+  }
+  if (data.curriculum !== undefined) exam.curriculum = mapCurriculumInput(data.curriculum);
+  if (data.postSubmissionResources !== undefined) exam.postSubmissionResources = mapResourcesInput(data.postSubmissionResources);
   if (data.openAt !== undefined) exam.openAt = data.openAt ? new Date(data.openAt) : undefined;
   if (data.closeAt !== undefined) exam.closeAt = data.closeAt ? new Date(data.closeAt) : undefined;
 
   await exam.save();
+}
+
+/** Allow updating postSubmissionResources even on published/closed exams */
+export async function updateResources(
+  id: string,
+  data: UpdateExamResourcesBody,
+  userId: string,
+  role: string
+): Promise<IExamPostSubmissionResources | null> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  const currentResources = exam.postSubmissionResources ?? {};
+
+  const updatedResources: IExamPostSubmissionResources = {
+    solutionVideoUrl: data.solutionVideoUrl !== undefined ? (data.solutionVideoUrl ?? undefined) : currentResources.solutionVideoUrl,
+    solutionDocumentUrl: data.solutionDocumentUrl !== undefined ? (data.solutionDocumentUrl ?? undefined) : currentResources.solutionDocumentUrl,
+    solutionNotes: data.solutionNotes !== undefined ? (data.solutionNotes ?? undefined) : currentResources.solutionNotes,
+    vocabularyItems: data.vocabularyItems !== undefined ? (data.vocabularyItems ? data.vocabularyItems.map((v) => ({
+      word: v.word,
+      phonetic: v.phonetic ?? undefined,
+      meaning: v.meaning,
+      contextSentence: v.contextSentence ?? undefined,
+    })) : []) : currentResources.vocabularyItems,
+  };
+
+  exam.postSubmissionResources = updatedResources;
+  await exam.save();
+
+  return exam.postSubmissionResources ?? null;
+}
+
+/** Allow updating curriculum metadata */
+export async function updateCurriculum(
+  id: string,
+  data: UpdateExamCurriculumBody,
+  userId: string,
+  role: string
+): Promise<IExamCurriculum | null> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  exam.curriculum = mapCurriculumInput(data);
+  await exam.save();
+
+  return exam.curriculum ?? null;
 }
 
 export async function remove(id: string, userId: string, role: string): Promise<void> {
@@ -460,9 +766,21 @@ export async function clone(
 
   assertOwnership(original, userId, role);
 
+  const clonedKind = original.kind ?? "mock";
+  const clonedScoringMode: ExamScoringMode =
+    clonedKind === "practice" ? "raw" : original.scoringMode ?? "band";
+
   const cloned = await ExamModel.create({
     title: `[Bản sao] ${original.title}`,
     description: original.description,
+    kind: clonedKind,
+    scoringMode: clonedScoringMode,
+    bandConversion:
+      clonedKind === "mock" && clonedScoringMode === "band"
+        ? normalizeBandConversion(original.bandConversion)
+        : undefined,
+    curriculum: original.curriculum,
+    postSubmissionResources: original.postSubmissionResources,
     durationMinutes: original.durationMinutes,
     sections: original.sections.map((section) => ({
       skill: section.skill,
@@ -484,11 +802,24 @@ export async function clone(
 }
 
 /** Count total questions across all sections. */
-function countExamQuestions(exam: IExam): number {
+export function countExamQuestions(exam: Pick<IExam, "sections">): number {
   let count = 0;
-  for (const section of exam.sections) {
-    for (const group of section.questionGroups) {
-      count += group.questions.length;
+  for (const section of exam.sections ?? []) {
+    for (const group of section.questionGroups ?? []) {
+      count += (group.questions ?? []).length;
+    }
+  }
+  return count;
+}
+
+/** Count total points across all questions (including weights). */
+export function countExamPoints(exam: Pick<IExam, "sections">): number {
+  let count = 0;
+  for (const section of exam.sections ?? []) {
+    for (const group of section.questionGroups ?? []) {
+      for (const question of group.questions ?? []) {
+        count += question.points ?? 1;
+      }
     }
   }
   return count;
@@ -522,6 +853,42 @@ export async function publish(
     );
   }
 
+  // Specific validation for practice: allow single or multiple parts
+  if (exam.kind === "practice") {
+    if (!exam.sections || exam.sections.length === 0) {
+      throw new BadRequestError(
+        "PRACTICE_MUST_HAVE_SECTIONS",
+        "Bài luyện tập phải có ít nhất 1 phần thi (section)."
+      );
+    }
+
+    for (const practiceSection of exam.sections) {
+      if (practiceSection.skill !== "listening" && practiceSection.skill !== "reading") {
+        throw new BadRequestError(
+          "PRACTICE_INVALID_SKILL",
+          "Bài luyện tập chỉ hỗ trợ kỹ năng Listening hoặc Reading."
+        );
+      }
+    }
+
+    if (
+      exam.curriculum?.part !== undefined &&
+      exam.sections.length === 1 &&
+      exam.sections[0].part !== undefined &&
+      exam.curriculum.part !== exam.sections[0].part
+    ) {
+      throw new BadRequestError(
+        "CURRICULUM_PART_MISMATCH",
+        `Phần curriculum.part (${exam.curriculum.part}) phải khớp với phần thi (${exam.sections[0].part}).`
+      );
+    }
+  }
+
+  if (exam.kind === "practice") {
+    exam.scoringMode = "raw";
+    exam.bandConversion = undefined;
+  }
+
   for (const section of exam.sections) {
     if (sectionUsesGroups(section)) {
       for (const group of section.questionGroups) {
@@ -542,9 +909,7 @@ export async function publish(
           }
         }
 
-        // FIX-11: warn when maxWords is set on a group type that ignores it.
-        const configuredMaxWords = (group.config as { maxWords?: unknown } | undefined)
-          ?.maxWords;
+        const configuredMaxWords = (group.config as { maxWords?: unknown } | undefined)?.maxWords;
         if (
           typeof configuredMaxWords === "number" &&
           !shouldEnforceWordLimit(group.groupType)
@@ -559,7 +924,7 @@ export async function publish(
     }
   }
 
-  // FIX-08/M-03: listening/reading must total 40 points (writing is band-scored).
+  // Listening/reading point check
   for (const section of exam.sections) {
     if (section.skill === "writing") continue;
 
@@ -577,7 +942,7 @@ export async function publish(
       );
     }
 
-    if (sectionPoints > 0 && sectionPoints !== 40) {
+    if (sectionPoints > 0 && sectionPoints !== 40 && exam.kind !== "practice") {
       logger.warn("exam.publish_points_mismatch", {
         examId: exam._id.toString(),
         skill: section.skill,

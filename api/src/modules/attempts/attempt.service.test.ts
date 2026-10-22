@@ -14,9 +14,11 @@ import {
   collectExamMediaIds,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
+  finalizeAttempt,
   getAttemptForRecovery,
   getAttemptResult,
   gradeGroupedQuestions,
+  gradeGroupedQuestionsDetailed,
   shuffleQuestionIds,
   startAttempt,
   stripGroupConfig,
@@ -355,6 +357,23 @@ describe("getAttemptResult permissions", () => {
     await expect(
       getAttemptResult(attemptId.toString(), { id: strangerStudentId.toString(), role: "student" })
     ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("allows student to access their own attempt when studentId is populated as an object", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: { _id: studentOwnerId, fullName: "Nguyen Giang", email: "giang@example.com" },
+      status: "in_progress", // will throw EXAM_NOT_SUBMITTED, proving it passed ATTEMPT_NOT_OWNED check
+      examId: { _id: new mongoose.Types.ObjectId(), title: "Test Exam" },
+      assignmentId: null,
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+
+    await expect(
+      getAttemptResult(attemptId.toString(), { id: studentOwnerId.toString(), role: "student" })
+    ).rejects.toThrow("Bài thi chưa được nộp.");
   });
 
   it("allows the exam owner teacher to access a student attempt", async () => {
@@ -942,5 +961,295 @@ describe("gradeGroupedQuestions word limit (FIX-11)", () => {
     ]);
 
     expect(score).toBe(0);
+  });
+});
+
+describe("gradeGroupedQuestions counts", () => {
+  it("returns correct, wrong and blank counts", () => {
+    const q1 = new mongoose.Types.ObjectId();
+    const q2 = new mongoose.Types.ObjectId();
+    const q3 = new mongoose.Types.ObjectId();
+
+    const result = gradeGroupedQuestionsDetailed(
+      [
+        { questionId: q1, value: "right" },
+        { questionId: q2, value: "wrong" },
+      ],
+      [
+        {
+          _id: q1,
+          questionNumber: 1,
+          acceptedAnswers: ["right"],
+          points: 1,
+          groupConfig: {},
+          groupType: "short_answer",
+        },
+        {
+          _id: q2,
+          questionNumber: 2,
+          acceptedAnswers: ["correct"],
+          points: 1,
+          groupConfig: {},
+          groupType: "short_answer",
+        },
+        {
+          _id: q3,
+          questionNumber: 3,
+          acceptedAnswers: ["answer"],
+          points: 1,
+          groupConfig: {},
+          groupType: "short_answer",
+        },
+      ]
+    );
+
+    expect(result).toEqual({
+      rawScore: 1,
+      correctCount: 1,
+      wrongCount: 1,
+      blankCount: 1,
+    });
+  });
+});
+
+describe("Practice start, scoring, and resources", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId().toString();
+
+  it("allows starting practice exam without assignmentId", async () => {
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce({
+      _id: examId,
+      kind: "practice",
+      status: "published",
+      durationMinutes: 20,
+    } as never).mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: examId,
+        kind: "practice",
+        durationMinutes: 20,
+        sections: [
+          {
+            skill: "reading",
+            part: 1,
+            questionGroups: [],
+          },
+        ],
+        toObject: () => ({ _id: examId, title: "Practice", sections: [] }),
+      }),
+    } as never);
+
+    vi.spyOn(AttemptModel, "findOne").mockResolvedValueOnce(null);
+
+    let createdAttemptData: unknown;
+    vi.spyOn(AttemptModel, "create").mockImplementationOnce((data: unknown) => {
+      createdAttemptData = data;
+      return {
+        _id: new mongoose.Types.ObjectId(),
+        examId,
+        studentId,
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + 20 * 60 * 1000),
+        status: "in_progress",
+        examKind: "practice",
+        skills: ["reading"],
+        questionCount: 0,
+      } as never;
+    });
+
+    const result = await startAttempt(studentId, examId);
+    expect(result.status).toBe("in_progress");
+    expect(createdAttemptData).toMatchObject({
+      examKind: "practice",
+      skills: ["reading"],
+    });
+  });
+
+  it("finalizes practice in raw mode without computing band score", async () => {
+    const qId = new mongoose.Types.ObjectId();
+    const attempt = {
+      _id: new mongoose.Types.ObjectId(),
+      studentId: new mongoose.Types.ObjectId(studentId),
+      examId: new mongoose.Types.ObjectId(examId),
+      status: "in_progress",
+      answers: [{ questionId: qId, value: "answer1" }],
+      scores: {},
+    };
+
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: examId,
+        kind: "practice",
+        scoringMode: "raw",
+        toObject: () => ({
+          _id: examId,
+          title: "Practice",
+          sections: [
+            {
+              skill: "reading",
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  questions: [
+                    {
+                      _id: qId,
+                      questionNumber: 1,
+                      acceptedAnswers: ["answer1"],
+                      points: 1,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    let savedScores: unknown;
+    vi.spyOn(AttemptModel, "findOneAndUpdate").mockImplementationOnce((_filter: unknown, update: unknown) => {
+      savedScores = (update as { $set: { scores: unknown } }).$set.scores;
+      return {
+        _id: attempt._id,
+        status: "submitted",
+        scores: savedScores,
+      } as never;
+    });
+
+    const result = await finalizeAttempt(attempt as never, new Date());
+    expect(result.status).toBe("submitted");
+    expect(savedScores).toMatchObject({
+      readingRaw: 1,
+    });
+    // Band score must NOT be calculated for practice in raw mode
+    expect((savedScores as { readingBand?: number }).readingBand).toBeUndefined();
+    expect((savedScores as { overallBand?: number }).overallBand).toBeUndefined();
+  });
+
+  it("forces raw scoring for practice even with legacy scoringMode=band", async () => {
+    const qId = new mongoose.Types.ObjectId();
+    const attempt = {
+      _id: new mongoose.Types.ObjectId(),
+      studentId: new mongoose.Types.ObjectId(studentId),
+      examId: new mongoose.Types.ObjectId(examId),
+      status: "in_progress",
+      answers: [{ questionId: qId, value: "answer1" }],
+      scores: {},
+    };
+
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: examId,
+        kind: "practice",
+        scoringMode: "band",
+        toObject: () => ({
+          _id: examId,
+          title: "Practice 40",
+          sections: [
+            {
+              skill: "reading",
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  questions: [
+                    {
+                      _id: qId,
+                      questionNumber: 1,
+                      acceptedAnswers: ["answer1"],
+                      points: 1,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    let savedScores: unknown;
+    vi.spyOn(AttemptModel, "findOneAndUpdate").mockImplementationOnce((_filter: unknown, update: unknown) => {
+      savedScores = (update as { $set: { scores: unknown } }).$set.scores;
+      return {
+        _id: attempt._id,
+        status: "submitted",
+        scores: savedScores,
+      } as never;
+    });
+
+    const result = await finalizeAttempt(attempt as never, new Date());
+    expect(result.status).toBe("submitted");
+    expect(savedScores).toMatchObject({
+      readingRaw: 1,
+    });
+    // Practice must never calculate bands, even if legacy data says band.
+    expect((savedScores as { readingBand?: number }).readingBand).toBeUndefined();
+    expect((savedScores as { overallBand?: number }).overallBand).toBeUndefined();
+  });
+
+  it("hides rawScore, percentage, and resources when showScoreAfterSubmit is false", async () => {
+    const qId = new mongoose.Types.ObjectId();
+    const attemptId = new mongoose.Types.ObjectId().toString();
+
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentId,
+      examId: { _id: examId, title: "Mock Exam", durationMinutes: 60 },
+      assignmentId: { teacherId: "teacher-1", showScoreAfterSubmit: false },
+      status: "submitted",
+      answers: [{ questionId: qId, value: "my-answer" }],
+      scores: { listeningRaw: 10, listeningBand: 5.0 },
+      questionCount: 40,
+    };
+
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValueOnce(null);
+
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: examId,
+        kind: "practice",
+        scoringMode: "raw",
+        postSubmissionResources: {
+          solutionNotes: "Hidden note",
+        },
+        toObject: () => ({
+          _id: examId,
+          sections: [
+            {
+              skill: "listening",
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  questions: [
+                    {
+                      _id: qId,
+                      questionNumber: 1,
+                      acceptedAnswers: ["correct-answer"],
+                      points: 1,
+                      explanation: "Hidden explanation",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    const result = await getAttemptResult(attemptId, { id: studentId, role: "student" });
+    // Resources must be hidden
+    expect(result.postSubmissionResources).toBeNull();
+    // Scores and rawScore/percentage must be hidden
+    expect(result.rawScore).toBeUndefined();
+    expect(result.percentage).toBeUndefined();
+    expect(result.scores).toEqual({});
+    // Answer keys must be masked
+    expect(result.details[0].acceptedAnswers).toEqual([]);
+    expect(result.details[0].isCorrect).toBe(false);
+    expect(result.details[0].explanation).toBeNull();
   });
 });

@@ -73,6 +73,12 @@ export async function logEvent(
     );
   }
 
+  // Practice không bật anti-cheat. Bỏ qua event để không đánh dấu suspicious
+  // và không làm attempt biến mất khỏi heatmap.
+  if (attempt.examKind === "practice") {
+    return { recorded: false, suspiciousFlag: false };
+  }
+
   // FIX-16: the authoritative timestamp is always server-side. A client-supplied
   // timestamp is preserved (untrusted) inside metadata.clientTimestamp.
   const metadata: Record<string, unknown> = { ...(data.metadata ?? {}) };

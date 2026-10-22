@@ -1,8 +1,15 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
+import { csvEscape } from "../../common/utils/csv.js";
 import { AttemptModel, type IAttemptScores } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
-import { ExamModel } from "../exams/exam.model.js";
+import {
+  ExamModel,
+  type ExamKind,
+  type ExamType,
+  type ICurriculum,
+  type IExam,
+} from "../exams/exam.model.js";
 import { UserModel } from "../users/user.model.js";
 import { AssignmentModel, type AssignmentStatus } from "./assignment.model.js";
 import type { CreateAssignmentBody, UpdateAssignmentBody } from "./assignment.validation.js";
@@ -40,11 +47,17 @@ export interface MyAssignment {
   className: string | null;
   attemptId: string | null;
   scores: IAttemptScores | null;
+  kind?: ExamKind;
+  examKind?: ExamKind;
+  type: ExamType;
+  curriculum?: ICurriculum;
 }
 
 export interface MyAssignmentsFilters {
   classId?: string;
   status?: SubmissionStatus | "all";
+  kind?: ExamKind;
+  type?: ExamType | "exam";
 }
 
 export interface AssignmentDetail {
@@ -73,6 +86,8 @@ interface PopulatedExam {
   _id: Types.ObjectId;
   title: string;
   durationMinutes: number;
+  type?: ExamType;
+  curriculum?: ICurriculum;
 }
 
 interface PopulatedTeacher {
@@ -165,6 +180,13 @@ export async function create(
 
   if (exam.status !== "published") {
     throw new BadRequestError("EXAM_NOT_PUBLISHED", "Đề thi chưa được xuất bản.");
+  }
+
+  if (exam.kind === "practice") {
+    throw new BadRequestError(
+      "PRACTICE_NOT_ASSIGNABLE",
+      "Bài luyện tập được làm tự do, không thể giao như bài tập/đề thi."
+    );
   }
 
   if (data.classId) {
@@ -372,7 +394,7 @@ export async function getMyAssignments(
       };
 
   const assignments = await AssignmentModel.find(assignmentQuery)
-    .populate("examId", "title durationMinutes")
+    .populate("examId", "title durationMinutes kind type curriculum")
     .populate("teacherId", "fullName")
     .populate("classId", "name")
     .sort({ assignedAt: -1 });
@@ -386,12 +408,25 @@ export async function getMyAssignments(
     teacherName: string;
     classId: string | null;
     className: string | null;
+    kind: ExamKind;
+    type: ExamType;
+    curriculum?: ICurriculum;
   }> = [];
 
   for (const assignment of assignments) {
-    const exam = assignment.examId as unknown as PopulatedExam | null;
+    const exam = assignment.examId as unknown as (PopulatedExam & { kind?: ExamKind }) | null;
 
     if (!exam) continue;
+
+    const examKind: ExamKind = exam.kind ?? (exam.type === "practice" ? "practice" : "mock");
+    const examType: ExamType = examKind;
+
+    const requestedKind: ExamKind | undefined =
+      filters.kind ??
+      (filters.type === "exam" ? "mock" : filters.type);
+    if (requestedKind && examKind !== requestedKind) {
+      continue;
+    }
 
     const teacher = assignment.teacherId as unknown as PopulatedTeacher | null;
     const cls = assignment.classId as unknown as PopulatedClass | null;
@@ -405,6 +440,9 @@ export async function getMyAssignments(
       teacherName: teacher?.fullName ?? "",
       classId: cls?._id ? cls._id.toString() : null,
       className: cls?.name ?? null,
+      kind: examKind,
+      type: examType,
+      curriculum: exam.curriculum,
     });
   }
 
@@ -457,8 +495,19 @@ export async function getMyAssignments(
       attemptId: selected ? selected._id.toString() : null,
       scores:
         selected && (selected.status === "submitted" || selected.status === "expired")
-          ? selected.scores
+          ? entry.kind === "practice"
+            ? {
+                ...selected.scores,
+                listeningBand: undefined,
+                readingBand: undefined,
+                overallBand: undefined,
+              }
+            : selected.scores
           : null,
+      kind: entry.kind,
+      examKind: entry.kind,
+      type: entry.type,
+      curriculum: entry.curriculum,
     };
   });
 
@@ -508,12 +557,14 @@ export interface AssignmentProgressResult {
 export async function getAssignmentsForTeacher(
   teacherId: string,
   role: string,
-  filters: { classId?: string; examId?: string; page: number; limit: number }
+  filters: { classId?: string; examId?: string; kind?: ExamKind; type?: ExamType | "exam"; page: number; limit: number }
 ): Promise<{
   assignments: unknown[];
   meta: { page: number; limit: number; total: number; totalPages: number };
 }> {
-  const { classId, examId, page, limit } = filters;
+  const { classId, examId, kind, type, page, limit } = filters;
+  const requestedKind: ExamKind | undefined =
+    kind ?? (type === "exam" ? "mock" : type);
   const query: Record<string, unknown> = {};
 
   if (role !== "admin") {
@@ -524,7 +575,22 @@ export async function getAssignmentsForTeacher(
     query.classId = classId;
   }
 
-  if (examId) {
+  if (requestedKind) {
+    const matchingExams = await ExamModel.find({
+      kind: requestedKind === "mock" ? { $in: ["mock", null] } : "practice",
+    } as mongoose.QueryFilter<IExam>).select("_id");
+    const matchingIds = matchingExams.map((e) => e._id);
+    if (examId) {
+      const examObjId = new mongoose.Types.ObjectId(examId);
+      if (matchingIds.some((id) => id.equals(examObjId))) {
+        query.examId = examObjId;
+      } else {
+        query.examId = new mongoose.Types.ObjectId();
+      }
+    } else {
+      query.examId = { $in: matchingIds };
+    }
+  } else if (examId) {
     query.examId = examId;
   }
 
@@ -532,7 +598,7 @@ export async function getAssignmentsForTeacher(
 
   const [assignments, total] = await Promise.all([
     AssignmentModel.find(query)
-      .populate("examId", "title durationMinutes")
+      .populate("examId", "title durationMinutes kind type curriculum")
       .populate("classId", "name code")
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -544,10 +610,14 @@ export async function getAssignmentsForTeacher(
     const a = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
     const examObj = a.examId && typeof a.examId === 'object' ? a.examId : null;
     const classObj = a.classId && typeof a.classId === 'object' ? a.classId : null;
+    const itemKind = examObj?.kind ?? (examObj?.type === "practice" ? "practice" : "mock");
     return {
       ...a,
       id: doc._id ? doc._id.toString() : doc.id || '',
       examTitle: a.examTitle ?? examObj?.title ?? '',
+      kind: itemKind,
+      type: itemKind,
+      curriculum: examObj?.curriculum,
       className: a.className ?? classObj?.name ?? null,
       targetLabel: a.targetLabel ?? classObj?.name ?? '—',
       stats: a.stats ?? { assigned: 0, submitted: 0, inProgress: 0 },
@@ -749,16 +819,6 @@ export async function getAssignmentProgress(
     overview,
     students,
   };
-}
-
-function csvEscape(value: unknown): string {
-  const text = value === null || value === undefined ? "" : String(value);
-
-  if (/[",\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-
-  return text;
 }
 
 export async function exportAssignmentCsv(

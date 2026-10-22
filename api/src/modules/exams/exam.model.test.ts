@@ -7,6 +7,11 @@ describe("ExamModel", () => {
     expect(ExamModel.modelName).toBe("Exam");
     expect(ExamModel.schema.path("title")).toBeDefined();
     expect(ExamModel.schema.path("description")).toBeDefined();
+    expect(ExamModel.schema.path("kind")).toBeDefined();
+    expect(ExamModel.schema.path("scoringMode")).toBeDefined();
+    expect(ExamModel.schema.path("curriculum.collectionName")).toBeDefined();
+    expect(ExamModel.schema.path("curriculum.part")).toBeDefined();
+    expect(ExamModel.schema.path("postSubmissionResources.solutionVideoUrl")).toBeDefined();
     expect(ExamModel.schema.path("durationMinutes")).toBeDefined();
     expect(ExamModel.schema.path("sections")).toBeDefined();
     expect(ExamModel.schema.path("status")).toBeDefined();
@@ -27,7 +32,7 @@ describe("ExamModel", () => {
     expect(error?.errors.createdBy).toBeDefined();
   });
 
-  it("applies defaults for durationMinutes, status and sections", async () => {
+  it("applies defaults for durationMinutes, status, kind, scoringMode and sections", async () => {
     const doc = new ExamModel({
       title: "IELTS Academic Mock Test 01",
       createdBy: new mongoose.Types.ObjectId(),
@@ -36,6 +41,9 @@ describe("ExamModel", () => {
     await expect(doc.validate()).resolves.toBeUndefined();
     expect(doc.durationMinutes).toBe(60);
     expect(doc.status).toBe("draft");
+    expect(doc.kind).toBe("mock");
+    expect(doc.scoringMode).toBe("band");
+    expect(doc.type).toBe("mock"); // Virtual
     expect(doc.sections).toHaveLength(0);
   });
 });

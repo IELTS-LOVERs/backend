@@ -1,12 +1,13 @@
 import crypto from "crypto";
 import mongoose, { type Types } from "mongoose";
-import { EXAM_GRACE_PERIOD_SECONDS, calculateBandScore } from "../../config/constants.js";
+import { EXAM_GRACE_PERIOD_SECONDS } from "../../config/constants.js";
 import { env } from "../../config/env.js";
 import {
   BadRequestError,
   ForbiddenError,
   NotFoundError,
 } from "../../common/errors/AppError.js";
+import { resolveBandScore } from "../../common/utils/band-conversion.js";
 import { calculateOverallBand } from "../../common/utils/ielts-calculator.js";
 import { logger } from "../../common/utils/logger.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
@@ -14,8 +15,11 @@ import { AssignmentModel, type IAssignment } from "../assignments/assignment.mod
 import { ClassModel } from "../classes/class.model.js";
 import {
   ExamModel,
+  type ExamKind,
+  type IBandConversion,
   type IExam,
   type IQuestionGroup,
+  type IExamPostSubmissionResources,
 } from "../exams/exam.model.js";
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
@@ -74,6 +78,8 @@ export interface CandidateExamSection {
 export interface CandidateExam {
   id: string;
   title: string;
+  kind: ExamKind;
+  scoringMode?: "band" | "raw";
   sections: CandidateExamSection[];
 }
 
@@ -155,6 +161,16 @@ export interface AttemptResult {
   scores: IAttemptScores;
   writingReview: AttemptWritingReview | null;
   details: ResultQuestionDetail[];
+  postSubmissionResources?: IExamPostSubmissionResources | null;
+  examKind?: ExamKind;
+  scoreMode?: "band" | "raw";
+  questionCount?: number;
+  totalPoints?: number;
+  rawScore?: number;
+  percentage?: number;
+  correctCount?: number;
+  wrongCount?: number;
+  blankCount?: number;
 }
 
 export interface RawPopulatedSection {
@@ -440,6 +456,9 @@ export function buildCandidateExam(
   return {
     id: examObj._id.toString(),
     title: examObj.title,
+    kind: (exam.kind ?? "mock") as ExamKind,
+    scoringMode:
+      exam.scoringMode ?? (exam.kind === "practice" ? "raw" : "band"),
     sections: (examObj.sections ?? []).map((section) => {
       const sectionMedia = (section.mediaIds ?? [])
         .map((item) => toCandidateMediaItem(item, urlMap))
@@ -554,34 +573,60 @@ function checkWordLimit(answer: string, config: Record<string, unknown>): boolea
   return wordCount <= maxWords;
 }
 
-/** Grade questions from embedded question groups (with word-limit enforcement) */
-export function gradeGroupedQuestions(
+export interface GradeBreakdown {
+  rawScore: number;
+  correctCount: number;
+  wrongCount: number;
+  blankCount: number;
+}
+
+/** Grade questions and return raw points + correct/wrong/blank counts. */
+export function gradeGroupedQuestionsDetailed(
   answers: Pick<IAttemptAnswer, "questionId" | "value">[],
   questions: GradableGroupQuestion[]
-): number {
+): GradeBreakdown {
   const answerByQuestionId = new Map(
     answers.map((answer) => [answer.questionId.toString(), answer.value])
   );
   let rawScore = 0;
+  let correctCount = 0;
+  let wrongCount = 0;
+  let blankCount = 0;
 
   for (const question of questions) {
     const value = answerByQuestionId.get(question._id.toString());
-    if (value === undefined) continue;
+
+    if (value === undefined || value.trim() === "") {
+      blankCount += 1;
+      continue;
+    }
 
     // Enforce word limit only for completion/short-answer types (FIX-11)
     if (
       shouldEnforceWordLimit(question.groupType) &&
       !checkWordLimit(value, question.groupConfig)
     ) {
+      wrongCount += 1;
       continue; // Over word limit = 0 marks
     }
 
     if (matchAnswer(value, question.acceptedAnswers)) {
       rawScore += question.points;
+      correctCount += 1;
+    } else {
+      wrongCount += 1;
     }
   }
 
-  return rawScore;
+  return { rawScore, correctCount, wrongCount, blankCount };
+}
+
+/** Grade questions from embedded question groups (with word-limit enforcement). */
+export function gradeGroupedQuestions(
+  answers: Pick<IAttemptAnswer, "questionId" | "value">[],
+  questions: GradableGroupQuestion[]
+): number {
+  return gradeGroupedQuestionsDetailed(answers, questions).rawScore;
 }
 
 function serializeScores(scores: IAttemptScores): IAttemptScores {
@@ -668,7 +713,13 @@ export async function startAttempt(
     throw new BadRequestError("EXAM_CLOSED", "Đề thi đã kết thúc thời gian làm bài.");
   }
 
-  if (env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT && !assignmentId) {
+  const isPractice = exam.kind === "practice";
+  const examScoringMode: "band" | "raw" =
+    isPractice ? "raw" : exam.scoringMode ?? "band";
+  const bandConversionSnapshot: IBandConversion | undefined =
+    !isPractice && examScoringMode === "band" ? exam.bandConversion : undefined;
+
+  if (env.REQUIRE_ASSIGNMENT_FOR_ATTEMPT && !assignmentId && !isPractice) {
     throw new BadRequestError(
       "ASSIGNMENT_REQUIRED",
       "Cần bắt đầu bài thi từ bài tập được giao."
@@ -770,6 +821,18 @@ export async function startAttempt(
     ? shuffleQuestionIds(collectCandidateQuestionIds(candidateExam), startedAt.getTime())
     : [];
 
+  const skills = [...new Set((populatedExam.sections ?? []).map((s) => s.skill))];
+  let questionCount = 0;
+  let totalPoints = 0;
+  for (const s of populatedExam.sections ?? []) {
+    for (const g of s.questionGroups ?? []) {
+      questionCount += (g.questions ?? []).length;
+      for (const q of g.questions ?? []) {
+        totalPoints += q.points ?? 1;
+      }
+    }
+  }
+
   try {
     const attempt = await AttemptModel.create({
       examId: exam._id,
@@ -779,8 +842,15 @@ export async function startAttempt(
       expiresAt,
       status: "in_progress",
       answers: [],
+      scores: {},
       suspicious: false,
       questionOrder,
+      examKind: (exam.kind ?? "mock") as ExamKind,
+      scoringMode: examScoringMode,
+      bandConversionSnapshot,
+      skills,
+      questionCount,
+      totalPoints,
     });
 
     return serializeStartResult(attempt, applyQuestionOrder(candidateExam, questionOrder));
@@ -828,19 +898,62 @@ export async function finalizeAttempt(
     overallBand: attempt.scores.overallBand,
   };
 
+  const examKind = (populatedExam.kind ?? "mock") as ExamKind;
+  const scoringMode =
+    examKind === "practice"
+      ? "raw"
+      : attempt.scoringMode ??
+        populatedExam.scoringMode ??
+        "band";
+  const rawMode = scoringMode === "raw";
+  const bandConversion =
+    attempt.bandConversionSnapshot ?? populatedExam.bandConversion;
+
+  let correctCount = 0;
+  let wrongCount = 0;
+  let blankCount = 0;
+
   if (hasListening) {
-    const rawScore = gradeGroupedQuestions(attempt.answers, listeningGrouped);
-    scores.listeningRaw = rawScore;
-    scores.listeningBand = calculateBandScore(rawScore, "listening");
+    const breakdown = gradeGroupedQuestionsDetailed(
+      attempt.answers,
+      listeningGrouped
+    );
+    scores.listeningRaw = breakdown.rawScore;
+    correctCount += breakdown.correctCount;
+    wrongCount += breakdown.wrongCount;
+    blankCount += breakdown.blankCount;
+    if (!rawMode) {
+      scores.listeningBand = resolveBandScore(
+        breakdown.rawScore,
+        "listening",
+        bandConversion
+      );
+    }
   }
 
   if (hasReading) {
-    const rawScore = gradeGroupedQuestions(attempt.answers, readingGrouped);
-    scores.readingRaw = rawScore;
-    scores.readingBand = calculateBandScore(rawScore, "reading");
+    const breakdown = gradeGroupedQuestionsDetailed(
+      attempt.answers,
+      readingGrouped
+    );
+    scores.readingRaw = breakdown.rawScore;
+    correctCount += breakdown.correctCount;
+    wrongCount += breakdown.wrongCount;
+    blankCount += breakdown.blankCount;
+    if (!rawMode) {
+      scores.readingBand = resolveBandScore(
+        breakdown.rawScore,
+        "reading",
+        bandConversion
+      );
+    }
   }
 
-  if (!hasWriting && (hasListening || hasReading)) {
+  if (rawMode) {
+    scores.listeningBand = undefined;
+    scores.readingBand = undefined;
+    scores.overallBand = undefined;
+  } else if (!hasWriting && (hasListening || hasReading)) {
     scores.overallBand = calculateOverallBand({
       listening: scores.listeningBand,
       reading: scores.readingBand,
@@ -854,6 +967,9 @@ export async function finalizeAttempt(
         status: targetStatus,
         submittedAt,
         scores,
+        correctCount,
+        wrongCount,
+        blankCount,
       },
     },
     { new: true }
@@ -1042,8 +1158,12 @@ export async function getAttemptResult(
     throw new NotFoundError("Bài làm không tồn tại.");
   }
 
+  const studentOwnerId =
+    (attempt.studentId as unknown as { _id?: Types.ObjectId | string })?._id?.toString() ??
+    attempt.studentId.toString();
+
   if (currentUser.role === "student") {
-    if (attempt.studentId.toString() !== currentUser.id) {
+    if (studentOwnerId !== currentUser.id) {
       throw new ForbiddenError(
         "ATTEMPT_NOT_OWNED",
         "Học sinh không có quyền truy cập bài làm này."
@@ -1111,6 +1231,90 @@ export async function getAttemptResult(
       ? Math.max(0, Math.round((new Date(submittedAt).getTime() - new Date(startedAt).getTime()) / 1000))
       : undefined;
 
+  const examKind = (populatedExam.kind ?? "mock") as ExamKind;
+  const scoringMode =
+    examKind === "practice"
+      ? "raw"
+      : attempt.scoringMode ??
+        populatedExam.scoringMode ??
+        "band";
+  const rawMode = scoringMode === "raw";
+
+  let questionCount = attempt.questionCount;
+  let totalPoints = attempt.totalPoints;
+  if (!questionCount || !totalPoints) {
+    let count = 0;
+    let points = 0;
+    for (const section of examObj.sections ?? []) {
+      for (const group of section.questionGroups ?? []) {
+        count += (group.questions ?? []).length;
+        for (const q of group.questions ?? []) {
+          points += q.points ?? 1;
+        }
+      }
+    }
+    if (!questionCount) questionCount = count;
+    if (!totalPoints) totalPoints = points;
+  }
+
+  let correctCount = attempt.correctCount;
+  let wrongCount = attempt.wrongCount;
+  let blankCount = attempt.blankCount;
+  if (
+    correctCount === undefined ||
+    wrongCount === undefined ||
+    blankCount === undefined
+  ) {
+    correctCount = 0;
+    wrongCount = 0;
+    blankCount = 0;
+    for (const detail of details) {
+      if (detail.groupType?.startsWith("writing")) continue;
+      if (!detail.studentAnswer || detail.studentAnswer.trim() === "") {
+        blankCount += 1;
+      } else if (detail.isCorrect) {
+        correctCount += 1;
+      } else {
+        wrongCount += 1;
+      }
+    }
+  }
+
+  let rawScore: number | undefined;
+  let percentage: number | undefined;
+
+  if (rawMode) {
+    const listening = attempt.scores?.listeningRaw ?? 0;
+    const reading = attempt.scores?.readingRaw ?? 0;
+    rawScore = listening + reading;
+    percentage =
+      totalPoints > 0 ? Math.round((rawScore / totalPoints) * 100) : 0;
+  }
+
+  if (!showScore) {
+    rawScore = undefined;
+    percentage = undefined;
+    correctCount = undefined;
+    wrongCount = undefined;
+    blankCount = undefined;
+    for (const d of details) {
+      d.acceptedAnswers = [];
+      d.isCorrect = false;
+      d.explanation = null;
+    }
+  }
+
+  const visibleScores = showScore ? serializeScores(attempt.scores) : {};
+  if (rawMode) {
+    visibleScores.listeningBand = undefined;
+    visibleScores.readingBand = undefined;
+    visibleScores.overallBand = undefined;
+  }
+
+  const postSubmissionResources = showScore
+    ? (populatedExam.postSubmissionResources ?? null)
+    : null;
+
   return {
     attemptId: attempt._id.toString(),
     examId: examIdRef.toString(),
@@ -1122,31 +1326,42 @@ export async function getAttemptResult(
     startedAt,
     submittedAt,
     durationSeconds,
-    scores: showScore ? serializeScores(attempt.scores) : {},
-    writingReview: review
-      ? {
-          id: review._id.toString(),
-          attemptId: review.attemptId.toString(),
-          task1: review.task1
-            ? {
-                score: review.task1.score,
-                comment: review.task1.comment ?? null,
-              }
-            : undefined,
-          task2: review.task2
-            ? {
-                score: review.task2.score,
-                comment: review.task2.comment ?? null,
-              }
-            : undefined,
-          overallWritingScore: review.overallWritingScore,
-          generalFeedback: review.generalFeedback ?? null,
-          teacherId: review.teacherId.toString(),
-          createdAt: review.createdAt,
-          updatedAt: review.updatedAt,
-        }
-      : null,
+    scores: visibleScores,
+    writingReview:
+      showScore && review
+        ? {
+            id: review._id.toString(),
+            attemptId: review.attemptId.toString(),
+            task1: review.task1
+              ? {
+                  score: review.task1.score,
+                  comment: review.task1.comment ?? null,
+                }
+              : undefined,
+            task2: review.task2
+              ? {
+                  score: review.task2.score,
+                  comment: review.task2.comment ?? null,
+                }
+              : undefined,
+            overallWritingScore: review.overallWritingScore,
+            generalFeedback: review.generalFeedback ?? null,
+            teacherId: review.teacherId.toString(),
+            createdAt: review.createdAt,
+            updatedAt: review.updatedAt,
+          }
+        : null,
     details,
+    postSubmissionResources,
+    examKind,
+    scoreMode: rawMode ? "raw" : "band",
+    questionCount,
+    totalPoints,
+    rawScore,
+    percentage,
+    correctCount,
+    wrongCount,
+    blankCount,
   };
 }
 
@@ -1155,6 +1370,7 @@ export interface MyAttemptExamSummary {
   title: string;
   durationMinutes: number;
   skills: string[];
+  kind?: ExamKind;
 }
 
 export interface MyAttemptItem {
@@ -1167,6 +1383,14 @@ export interface MyAttemptItem {
   status: AttemptStatus;
   scores: IAttemptScores;
   suspicious: boolean;
+  examKind?: ExamKind;
+  scoringMode?: "band" | "raw";
+  totalPoints?: number;
+  rawScore?: number;
+  percentage?: number;
+  correctCount?: number;
+  wrongCount?: number;
+  blankCount?: number;
 }
 
 export interface MyAttemptsResult {
@@ -1202,7 +1426,7 @@ export async function getMyAttempts(
   const [total, attempts] = await Promise.all([
     AttemptModel.countDocuments(filter),
     AttemptModel.find(filter)
-      .populate("examId", "title durationMinutes sections.skill")
+      .populate("examId", "title durationMinutes sections.skill kind")
       .sort({ startedAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -1213,8 +1437,25 @@ export async function getMyAttempts(
       _id: Types.ObjectId;
       title?: string;
       durationMinutes?: number;
+      kind?: ExamKind;
       sections?: { skill?: string }[];
     } | null;
+
+    const examKind: ExamKind =
+      (attempt.examKind ?? examDoc?.kind ?? "mock") as ExamKind;
+    const scoringMode =
+      examKind === "practice"
+        ? "raw"
+        : attempt.scoringMode ?? "band";
+    const rawScore =
+      (attempt.scores?.listeningRaw ?? 0) + (attempt.scores?.readingRaw ?? 0);
+    const totalPoints = attempt.totalPoints ?? 0;
+    const visibleScores = serializeScores(attempt.scores);
+    if (scoringMode === "raw") {
+      visibleScores.listeningBand = undefined;
+      visibleScores.readingBand = undefined;
+      visibleScores.overallBand = undefined;
+    }
 
     const examSummary: MyAttemptExamSummary | null = examDoc
       ? {
@@ -1224,6 +1465,7 @@ export async function getMyAttempts(
           skills: Array.from(
             new Set((examDoc.sections ?? []).map((s) => s.skill).filter(Boolean) as string[])
           ),
+          kind: (examDoc.kind ?? examKind) as ExamKind,
         }
       : null;
 
@@ -1235,8 +1477,19 @@ export async function getMyAttempts(
       expiresAt: attempt.expiresAt,
       submittedAt: attempt.submittedAt ?? null,
       status: attempt.status,
-      scores: serializeScores(attempt.scores),
+      scores: visibleScores,
       suspicious: attempt.suspicious,
+      examKind,
+      scoringMode,
+      totalPoints,
+      rawScore,
+      percentage:
+        scoringMode === "raw" && totalPoints > 0
+          ? Math.round((rawScore / totalPoints) * 100)
+          : undefined,
+      correctCount: attempt.correctCount,
+      wrongCount: attempt.wrongCount,
+      blankCount: attempt.blankCount,
     };
   });
 

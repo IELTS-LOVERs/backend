@@ -26,6 +26,8 @@ export async function getMyAssignments(req: Request, res: Response): Promise<voi
   const assignments = await assignmentService.getMyAssignments(user.id, {
     classId: query.classId,
     status: query.status,
+    kind: query.kind,
+    type: query.type,
   });
   sendSuccess(res, assignments);
 }
@@ -39,6 +41,8 @@ export async function getAssignments(req: Request, res: Response): Promise<void>
     {
       classId: query.classId,
       examId: query.examId,
+      kind: query.kind,
+      type: query.type,
       page: query.page,
       limit: query.limit,
     }

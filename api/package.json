@@ -16,7 +16,8 @@
     "smoke": "tsx src/scripts/smoke-test.ts",
     "auto-finalize": "tsx src/scripts/auto-finalize.ts",
     "cleanup-media": "tsx src/scripts/cleanup-media.ts",
-    "fix-attempt-indexes": "tsx src/scripts/fix-attempt-indexes.ts"
+    "fix-attempt-indexes": "tsx src/scripts/fix-attempt-indexes.ts",
+    "backfill-practice": "tsx src/scripts/backfill-practice.ts"
   },
   "engines": {
     "node": ">=20"

@@ -2,7 +2,12 @@ import type { Request, Response } from "express";
 import { UnauthorizedError } from "../../common/errors/AppError.js";
 import { sendSuccess } from "../../common/utils/response.util.js";
 import * as examService from "./exam.service.js";
-import type { ListExamsQuery, UpdateExamMetadataBody } from "./exam.validation.js";
+import type {
+  ListExamsQuery,
+  UpdateExamCurriculumBody,
+  UpdateExamMetadataBody,
+  UpdateExamResourcesBody,
+} from "./exam.validation.js";
 
 function requireUser(req: Request): NonNullable<Request["user"]> {
   if (!req.user) {
@@ -50,6 +55,30 @@ export async function updateExamMetadata(req: Request, res: Response): Promise<v
   const id = req.params.id as string;
   await examService.updateMetadata(id, req.body as UpdateExamMetadataBody, user.id, user.role);
   sendSuccess(res, { id, message: "Cập nhật thông tin đề thi thành công" });
+}
+
+export async function updateExamResources(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const resources = await examService.updateResources(
+    id,
+    req.body as UpdateExamResourcesBody,
+    user.id,
+    user.role
+  );
+  sendSuccess(res, { id, resources, message: "Cập nhật tài liệu sau nộp thành công" });
+}
+
+export async function updateExamCurriculum(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const curriculum = await examService.updateCurriculum(
+    id,
+    req.body as UpdateExamCurriculumBody,
+    user.id,
+    user.role
+  );
+  sendSuccess(res, { id, curriculum, message: "Cập nhật lộ trình thành công" });
 }
 
 export async function deleteExam(req: Request, res: Response): Promise<void> {

@@ -26,6 +26,9 @@ describe("AttemptModel", () => {
     expect(AttemptModel.schema.path("scores.overallBand")).toBeDefined();
     expect(AttemptModel.schema.path("suspicious")).toBeDefined();
     expect(AttemptModel.schema.path("questionOrder")).toBeDefined();
+    expect(AttemptModel.schema.path("examKind")).toBeDefined();
+    expect(AttemptModel.schema.path("skills")).toBeDefined();
+    expect(AttemptModel.schema.path("questionCount")).toBeDefined();
   });
 
   it("requires examId, studentId and expiresAt", async () => {
@@ -41,7 +44,7 @@ describe("AttemptModel", () => {
     expect(error?.errors.expiresAt).toBeDefined();
   });
 
-  it("applies defaults for startedAt, status, answers and suspicious", async () => {
+  it("applies defaults for startedAt, status, answers, suspicious, examKind and questionCount", async () => {
     const doc = new AttemptModel({
       examId: new mongoose.Types.ObjectId(),
       studentId: new mongoose.Types.ObjectId(),
@@ -54,6 +57,8 @@ describe("AttemptModel", () => {
     expect(doc.answers).toHaveLength(0);
     expect(doc.suspicious).toBe(false);
     expect(doc.questionOrder).toHaveLength(0);
+    expect(doc.examKind).toBe("mock");
+    expect(doc.questionCount).toBe(0);
     expect(doc.scores.listeningRaw).toBeUndefined();
     expect(doc.scores.overallBand).toBeUndefined();
   });

@@ -21,6 +21,7 @@ import { mediaRoutes } from "./modules/media/media.routes.js";
 import { antiCheatRoutes } from "./modules/anti-cheat/anti-cheat.routes.js";
 import { dashboardRoutes } from "./modules/dashboard/dashboard.routes.js";
 import { analyticsRoutes } from "./modules/analytics/analytics.routes.js";
+import { practiceRoutes } from "./modules/practice/practice.routes.js";
 
 const app = express();
 
@@ -68,6 +69,7 @@ app.use("/api/media", mediaRoutes);
 app.use("/api/anti-cheat", antiCheatRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/practice", practiceRoutes);
 
 
 app.use((_req, res) => {

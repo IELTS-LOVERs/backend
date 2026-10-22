@@ -66,6 +66,7 @@ export async function getStudentDashboard(
         studentId,
         status: { $in: ["submitted", "expired"] },
         "scores.overallBand": { $ne: null },
+        $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
       }).select("scores.overallBand"),
       getMyAttempts(studentId, { page: 1, limit: 5 }),
     ]);
@@ -136,6 +137,7 @@ export async function getTeacherDashboard(
     AttemptModel.find({
       ...attemptFilter,
       "scores.overallBand": { $ne: null },
+      $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
     }).select("scores.overallBand"),
     AttemptModel.find(attemptFilter)
       .populate("studentId", "fullName email")

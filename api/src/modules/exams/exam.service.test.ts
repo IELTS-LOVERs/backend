@@ -5,6 +5,7 @@ import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "./exam.model.js";
+import { canStudentAccessExam } from "./exam.access.js";
 import {
   assertOwnership,
   clone,
@@ -13,6 +14,8 @@ import {
   mapSections,
   publish,
   unpublish,
+  update,
+  updateMetadata,
 } from "./exam.service.js";
 
 describe("mapSections", () => {
@@ -137,6 +140,100 @@ describe("publish and unpublish", () => {
     expect(result.status).toBe("published");
     expect(mockExam.status).toBe("published");
     expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("throws BadRequestError (EXAM_EMPTY) when practice has 0 sections", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      sections: [],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      "Đề thi phải có ít nhất một câu hỏi để xuất bản."
+    );
+  });
+
+  it("allows practice exam with multiple sections (multi-part)", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      scoringMode: "raw",
+      sections: [
+        { skill: "reading", part: 1, questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["a"] }] }] },
+        { skill: "reading", part: 2, questionGroups: [{ questions: [{ questionNumber: 2, acceptedAnswers: ["b"] }] }] },
+      ],
+      status: "draft",
+      save: vi.fn().mockResolvedValue(true),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    const result = await publish(examId.toString(), teacherId.toString(), "teacher");
+    expect(result.status).toBe("published");
+  });
+
+  it("throws BadRequestError (PRACTICE_INVALID_SKILL) when practice has writing skill", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      sections: [
+        { skill: "writing", questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["a"] }] }] },
+      ],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      "Bài luyện tập chỉ hỗ trợ kỹ năng Listening hoặc Reading."
+    );
+  });
+
+  it("forces practice scoringMode to raw on publish (legacy band data)", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      scoringMode: "band",
+      bandConversion: { mode: "auto", readingType: "academic" },
+      sections: [
+        { skill: "reading", questionGroups: [{ questions: [{ questionNumber: 1, points: 13, acceptedAnswers: ["a"] }] }] },
+      ],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).resolves.toMatchObject({
+      status: "published",
+    });
+    expect(mockExam.scoringMode).toBe("raw");
+    expect(mockExam.bandConversion).toBeUndefined();
+  });
+
+  it("throws BadRequestError (CURRICULUM_PART_MISMATCH) when curriculum.part != section.part", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      curriculum: { part: 2 },
+      sections: [
+        { part: 1, skill: "reading", questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["a"] }] }] },
+      ],
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
+      "Phần curriculum.part (2) phải khớp với phần thi (1)."
+    );
   });
 
   it("throws BadRequestError (EXAM_NOT_PUBLISHED) when unpublishing non-published exam", async () => {
@@ -316,5 +413,139 @@ describe("BUG-04 clone ownership", () => {
     await expect(
       clone(original._id.toString(), "stranger-teacher", "teacher")
     ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("copies kind, scoringMode, curriculum, and postSubmissionResources when cloning", async () => {
+    const teacherId = new mongoose.Types.ObjectId();
+    const original = {
+      _id: new mongoose.Types.ObjectId(),
+      title: "Test Exam",
+      description: "Description",
+      kind: "practice",
+      scoringMode: "raw",
+      curriculum: { collectionName: "Cam 18", testNumber: 1, part: 1, orderIndex: 1 },
+      postSubmissionResources: { solutionVideoUrl: "https://youtube.com/watch?v=123" },
+      durationMinutes: 20,
+      sections: [],
+      openAt: undefined,
+      closeAt: undefined,
+      createdBy: teacherId,
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(original as never);
+
+    let createArgs: unknown;
+    vi.spyOn(ExamModel, "create").mockImplementationOnce((args: unknown) => {
+      createArgs = args;
+      return {
+        _id: new mongoose.Types.ObjectId(),
+        title: (args as { title: string }).title,
+        status: "draft",
+      } as never;
+    });
+
+    const result = await clone(original._id.toString(), teacherId.toString(), "teacher");
+    expect(result.status).toBe("draft");
+    expect(result.title).toBe("[Bản sao] Test Exam");
+    expect(createArgs).toMatchObject({
+      kind: "practice",
+      scoringMode: "raw",
+      curriculum: original.curriculum,
+      postSubmissionResources: original.postSubmissionResources,
+    });
+  });
+});
+
+describe("Exam kind immutability", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+
+  it("throws EXAM_KIND_IMMUTABLE when updating kind on published exam via updateMetadata", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "mock",
+      status: "published",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(
+      updateMetadata(examId.toString(), { kind: "practice" }, teacherId.toString(), "teacher")
+    ).rejects.toThrow("Không thể thay đổi loại đề thi sau khi đã xuất bản.");
+  });
+
+  it("throws EXAM_KIND_IMMUTABLE when updating kind on draft exam with existing attempts", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "mock",
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: new mongoose.Types.ObjectId() } as never);
+
+    await expect(
+      update(examId.toString(), { kind: "practice" }, teacherId.toString(), "teacher")
+    ).rejects.toThrow("Không thể thay đổi loại đề thi sau khi đã có bài tập hoặc lượt làm bài.");
+  });
+});
+
+describe("scoringMode immutability", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+
+  it("blocks changing scoringMode once attempts exist", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "mock",
+      status: "published",
+      scoringMode: "band",
+      sections: [],
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+    } as never);
+
+    await expect(
+      updateMetadata(examId.toString(), { scoringMode: "raw" }, teacherId.toString(), "teacher")
+    ).rejects.toThrow("Không thể thay đổi cách chấm điểm sau khi đã có lượt làm bài.");
+  });
+});
+
+describe("closed exam student access", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+  const examId = new mongoose.Types.ObjectId();
+
+  it("allows a closed exam when the student already has an attempt", async () => {
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({
+      _id: new mongoose.Types.ObjectId(),
+    } as never);
+
+    await expect(
+      canStudentAccessExam(studentId, {
+        _id: examId,
+        status: "closed",
+        kind: "mock",
+        createdBy: new mongoose.Types.ObjectId(),
+      } as never)
+    ).resolves.toBe(true);
+  });
+
+  it("denies a closed exam when the student never attempted it", async () => {
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+
+    await expect(
+      canStudentAccessExam(studentId, {
+        _id: examId,
+        status: "closed",
+        kind: "practice",
+        createdBy: new mongoose.Types.ObjectId(),
+      } as never)
+    ).resolves.toBe(false);
   });
 });

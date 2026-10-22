@@ -2,6 +2,8 @@ import { Router } from "express";
 import { authenticate } from "../../common/middlewares/auth.middleware.js";
 import { requireRoles } from "../../common/middlewares/rbac.middleware.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
+import * as practiceController from "../practice/practice.controller.js";
+import { WeeklyReportQuerySchema } from "../practice/practice.validation.js";
 import * as classController from "./class.controller.js";
 import {
   AddStudentSchema,
@@ -11,6 +13,21 @@ import {
 } from "./class.validation.js";
 
 const router = Router();
+
+router.get(
+  "/:classId/reports/weekly.csv",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  validate(WeeklyReportQuerySchema),
+  practiceController.getClassWeeklyReportCsv
+);
+router.get(
+  "/:classId/reports/weekly",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  validate(WeeklyReportQuerySchema),
+  practiceController.getClassWeeklyReport
+);
 
 router.get("/", authenticate, classController.getClasses);
 router.post(

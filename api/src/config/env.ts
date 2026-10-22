@@ -111,6 +111,13 @@ const EnvSchema = z.object({
   for (const message of validateProductionSecrets(value)) {
     ctx.addIssue({ code: "custom", message });
   }
+  if (value.NODE_ENV === "production" && !value.REQUIRE_ASSIGNMENT_FOR_ATTEMPT) {
+    ctx.addIssue({
+      code: "custom",
+      message:
+        "REQUIRE_ASSIGNMENT_FOR_ATTEMPT phải là true trong production để Mock test không bị làm tự do ngoài assignment.",
+    });
+  }
 });
 
 const parsed = EnvSchema.safeParse(process.env);

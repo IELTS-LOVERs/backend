@@ -1,4 +1,5 @@
 import mongoose, { type Types } from "mongoose";
+import type { ExamKind, IBandConversion } from "../exams/exam.model.js";
 
 const { Schema, model } = mongoose;
 
@@ -34,6 +35,16 @@ export interface IAttempt extends mongoose.Document {
   scores: IAttemptScores;
   suspicious: boolean;
   questionOrder: string[];
+  examKind: ExamKind;
+  scoringMode?: "band" | "raw";
+  bandConversionSnapshot?: IBandConversion;
+  skills: Array<"listening" | "reading" | "writing">;
+  questionCount: number;
+  /** Tổng điểm tối đa của đề tại thời điểm bắt đầu (dùng cho % practice). */
+  totalPoints: number;
+  correctCount?: number;
+  wrongCount?: number;
+  blankCount?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -73,6 +84,22 @@ const AttemptSchema = new Schema<IAttempt>(
     },
     suspicious: { type: Boolean, default: false },
     questionOrder: { type: [String], default: [] },
+    examKind: {
+      type: String,
+      enum: ["practice", "mock"],
+      default: "mock",
+      required: true,
+      index: true,
+    },
+    // Snapshot để đổi scoringMode trên Exam không làm thay đổi kết quả cũ.
+    scoringMode: { type: String, enum: ["band", "raw"] },
+    bandConversionSnapshot: { type: Schema.Types.Mixed },
+    skills: [{ type: String, enum: ["listening", "reading", "writing"] }],
+    questionCount: { type: Number, default: 0 },
+    totalPoints: { type: Number, default: 0 },
+    correctCount: { type: Number },
+    wrongCount: { type: Number },
+    blankCount: { type: Number },
   },
   { timestamps: true, versionKey: false }
 );
@@ -80,6 +107,8 @@ const AttemptSchema = new Schema<IAttempt>(
 AttemptSchema.index({ examId: 1, status: 1 });
 AttemptSchema.index({ assignmentId: 1 });
 AttemptSchema.index({ status: 1, expiresAt: 1 });
+AttemptSchema.index({ studentId: 1, status: 1, submittedAt: 1 });
+AttemptSchema.index({ studentId: 1, examKind: 1, status: 1, submittedAt: 1 });
 AttemptSchema.index(
   { studentId: 1, examId: 1 },
   {
