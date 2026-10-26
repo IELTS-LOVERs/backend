@@ -291,7 +291,7 @@ export async function login(
   data: LoginBody,
   userAgent?: string,
   presentedRefreshToken?: string
-): Promise<{ user: IUser } & AuthTokens> {
+): Promise<{ user: IUser; sessionReplaced: boolean } & AuthTokens> {
   const user = await UserModel.findOne({ email: data.email.toLowerCase().trim() });
 
   if (!user || user.status === "suspended") {
@@ -317,9 +317,21 @@ export async function login(
   // Same browser / second tab: reuse the active session id so logging in again
   // does not invalidate the other tabs. A different device has no matching
   // cookie and gets a fresh sid (last-login-wins).
+  const now = Date.now();
+  const hadActiveSession = Boolean(
+    user.activeSessionId &&
+      (user.refreshSessions ?? []).some(
+        (session) =>
+          session.sessionId === user.activeSessionId &&
+          session.expiresAt.getTime() > now
+      )
+  );
   const reuseSessionId = resolveReusableSessionId(user, presentedRefreshToken);
+  const sessionReplaced =
+    isSingleDeviceRole(user.role) && !reuseSessionId && hadActiveSession;
+
   const tokens = await issueTokens(user, userAgent, reuseSessionId);
-  return { user, ...tokens };
+  return { user, sessionReplaced, ...tokens };
 }
 
 /**

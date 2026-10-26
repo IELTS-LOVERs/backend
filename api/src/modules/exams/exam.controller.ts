@@ -115,3 +115,17 @@ export async function closeExam(req: Request, res: Response): Promise<void> {
   const exam = await examService.close(id, user.id, user.role);
   sendSuccess(res, exam);
 }
+
+export async function reopenExam(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const exam = await examService.reopen(id, user.id, user.role);
+  sendSuccess(res, exam);
+}
+
+export async function convertExamToDraft(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const exam = await examService.convertToDraft(id, user.id, user.role);
+  sendSuccess(res, exam);
+}

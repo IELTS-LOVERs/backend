@@ -14,6 +14,7 @@ import {
   collectExamMediaIds,
   collectExamQuestionBuckets,
   computeRemainingSeconds,
+  examMediaPresignTtl,
   finalizeAttempt,
   getAttemptForRecovery,
   getAttemptResult,
@@ -941,6 +942,23 @@ describe("stripGroupConfig whitelist (FIX-18)", () => {
     expect(result.options).toBeDefined();
     expect(result.maxWords).toBe(3);
     expect(result.foo).toBeUndefined();
+  });
+
+  it("keeps allowChangeAnswer so the candidate UI can lock answers", () => {
+    const result = stripGroupConfig({ allowChangeAnswer: false, secret: "x" });
+
+    expect(result.allowChangeAnswer).toBe(false);
+    expect(result.secret).toBeUndefined();
+  });
+});
+
+describe("examMediaPresignTtl", () => {
+  it("covers the attempt plus six hours of slack", () => {
+    expect(examMediaPresignTtl(60)).toBe(60 * 60 + 6 * 3600);
+  });
+
+  it("stays valid for short practice attempts", () => {
+    expect(examMediaPresignTtl(10)).toBe(10 * 60 + 6 * 3600);
   });
 });
 

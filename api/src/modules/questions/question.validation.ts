@@ -1,10 +1,12 @@
 import { z } from "zod";
+import { RichDocSchema } from "../exams/exam.validation.js";
 
 const SkillEnum = z.enum(["listening", "reading", "writing"]);
 
 /** One answer slot inside a bank Question Group. */
 const BankQuestionItemSchema = z.object({
   prompt: z.string().default(""),
+  promptDoc: RichDocSchema.optional().nullable(),
   acceptedAnswers: z.array(z.string()).default([]),
   points: z.number().int("Điểm phải là số nguyên").min(1).max(10).default(1),
   explanation: z.string().optional(),
@@ -22,6 +24,7 @@ export const CreateQuestionSchema = z.object({
     part: z.number().int().min(1).max(4),
     groupType: z.string().min(1, "Dạng câu hỏi không hợp lệ"),
     instructions: z.string().default(""),
+    instructionsDoc: RichDocSchema.optional().nullable(),
     config: z.record(z.string(), z.any()).default({}),
     questions: z.array(BankQuestionItemSchema).min(1, "Nhóm câu hỏi phải có ít nhất 1 câu"),
   }),
@@ -47,6 +50,7 @@ export const UpdateQuestionSchema = z.object({
     part: z.number().int().min(1).max(4).optional(),
     groupType: z.string().min(1, "Dạng câu hỏi không hợp lệ").optional(),
     instructions: z.string().optional(),
+    instructionsDoc: RichDocSchema.optional().nullable(),
     config: z.record(z.string(), z.any()).optional(),
     questions: z.array(BankQuestionItemSchema).min(1, "Nhóm câu hỏi phải có ít nhất 1 câu").optional(),
   }),

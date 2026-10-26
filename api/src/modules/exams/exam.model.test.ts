@@ -14,6 +14,10 @@ describe("ExamModel", () => {
     expect(ExamModel.schema.path("postSubmissionResources.solutionVideoUrl")).toBeDefined();
     expect(ExamModel.schema.path("durationMinutes")).toBeDefined();
     expect(ExamModel.schema.path("sections")).toBeDefined();
+    expect(ExamModel.schema.path("sections.instructionsDoc")).toBeDefined();
+    expect(ExamModel.schema.path("sections.passageDoc")).toBeDefined();
+    expect(ExamModel.schema.path("sections.questionGroups.instructionsDoc")).toBeDefined();
+    expect(ExamModel.schema.path("sections.questionGroups.questions.promptDoc")).toBeDefined();
     expect(ExamModel.schema.path("status")).toBeDefined();
     expect(ExamModel.schema.path("openAt")).toBeDefined();
     expect(ExamModel.schema.path("closeAt")).toBeDefined();

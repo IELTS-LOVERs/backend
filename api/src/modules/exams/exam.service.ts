@@ -35,6 +35,7 @@ import {
   type IExamSection,
   type IQuestionGroup,
   type IQuestionItem,
+  type RichDocValue,
 } from "./exam.model.js";
 import { canStudentAccessExam, getAssignedExamIds } from "./exam.access.js";
 import type {
@@ -85,6 +86,7 @@ export interface SerializedQuestionItem {
   id: string;
   questionNumber: number;
   prompt: string;
+  promptDoc?: RichDocValue | null;
   acceptedAnswers: string[];
   points: number;
   explanation: string | null;
@@ -95,6 +97,7 @@ export interface SerializedQuestionGroup {
   id: string;
   groupType: QuestionGroupType;
   instructions: string;
+  instructionsDoc?: RichDocValue | null;
   config: Record<string, unknown>;
   /** Resolved group-level image (config.imageMediaId) with a presigned URL. */
   media: CandidateMediaItem[];
@@ -107,7 +110,9 @@ export interface ExamSectionDetail {
   part: number;
   title: string;
   instructions: string | null;
+  instructionsDoc?: RichDocValue | null;
   passageText: string | null;
+  passageDoc?: RichDocValue | null;
   transcript: string | null;
   mediaIds: string[];
   media: CandidateMediaItem[];
@@ -134,6 +139,10 @@ export interface ExamDetail {
   postSubmissionResources?: IExamPostSubmissionResources;
   openAt: Date | null;
   closeAt: Date | null;
+  /** True when at least one student has attempted this exam (teacher view). */
+  hasAttempts?: boolean;
+  /** True when the exam is assigned to at least one class (teacher view). */
+  hasAssignments?: boolean;
   sections: ExamSectionDetail[];
   type?: ExamKind;
 }
@@ -214,6 +223,7 @@ function mapQuestionItemInput(item: QuestionItemInput): Partial<IQuestionItem> {
     ...(safeId ? { _id: safeId } : {}),
     questionNumber: item.questionNumber,
     prompt: item.prompt ?? "",
+    promptDoc: item.promptDoc ?? undefined,
     acceptedAnswers: item.acceptedAnswers ?? [],
     points: item.points ?? 1,
     explanation: item.explanation ?? undefined,
@@ -227,6 +237,7 @@ function mapQuestionGroupInput(group: QuestionGroupInput): Partial<IQuestionGrou
     ...(safeId ? { _id: safeId } : {}),
     groupType: group.groupType as QuestionGroupType,
     instructions: group.instructions ?? "",
+    instructionsDoc: group.instructionsDoc ?? undefined,
     config: group.config ?? {},
     questions: (group.questions ?? []).map(mapQuestionItemInput) as IQuestionItem[],
   };
@@ -245,7 +256,9 @@ export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
       part: section.part,
       title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
       instructions: section.instructions ?? undefined,
+      instructionsDoc: section.instructionsDoc ?? undefined,
       passageText: section.passageText ?? undefined,
+      passageDoc: section.passageDoc ?? undefined,
       transcript: section.transcript ?? undefined,
       mediaIds,
       questionGroups: (section.questionGroups ?? []).map(mapQuestionGroupInput) as IQuestionGroup[],
@@ -258,6 +271,7 @@ function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
     id: item._id?.toString() ?? "",
     questionNumber: item.questionNumber,
     prompt: item.prompt ?? "",
+    ...(item.promptDoc ? { promptDoc: item.promptDoc } : {}),
     acceptedAnswers: item.acceptedAnswers ?? [],
     points: item.points ?? 1,
     explanation: item.explanation ?? null,
@@ -280,6 +294,7 @@ function serializeQuestionGroup(
     id: group._id?.toString() ?? "",
     groupType: group.groupType,
     instructions: group.instructions ?? "",
+    ...(group.instructionsDoc ? { instructionsDoc: group.instructionsDoc } : {}),
     config: group.config ?? {},
     media,
     questions: (group.questions ?? []).map(serializeQuestionItem),
@@ -507,6 +522,11 @@ export async function getById(
     throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 
+  const [hasAttempts, hasAssignments] = await Promise.all([
+    AttemptModel.exists({ examId: exam._id }),
+    AssignmentModel.exists({ examId: exam._id }),
+  ]);
+
   const sections: ExamSectionDetail[] = exam.sections.map((section) => {
     const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId).filter(Boolean);
     const sectionMedia = (section.mediaIds ?? [])
@@ -519,7 +539,9 @@ export async function getById(
       part: section.part,
       title: section.title?.trim() || getDefaultSectionTitle(section.skill, section.part),
       instructions: section.instructions ?? null,
+      instructionsDoc: section.instructionsDoc ?? null,
       passageText: section.passageText ?? null,
+      passageDoc: section.passageDoc ?? null,
       transcript: section.transcript ?? null,
       mediaIds: sectionMediaIds,
       media: sectionMedia,
@@ -552,6 +574,8 @@ export async function getById(
     postSubmissionResources: exam.postSubmissionResources,
     openAt: exam.openAt ?? null,
     closeAt: exam.closeAt ?? null,
+    hasAttempts: Boolean(hasAttempts),
+    hasAssignments: Boolean(hasAssignments),
     sections,
     type: exam.kind ?? "mock",
   };
@@ -754,14 +778,115 @@ export async function updateCurriculum(
 export async function remove(id: string, userId: string, role: string): Promise<void> {
   const exam = await findOwnedExam(id, userId, role);
 
-  if (exam.status !== "draft") {
+  if (exam.status === "published") {
     throw new BadRequestError(
       "EXAM_CANNOT_EDIT_PUBLISHED",
-      "Không thể sửa hoặc xóa đề thi đã xuất bản."
+      "Đề đã xuất bản không thể xoá trực tiếp. Hãy dùng “Sửa” để chuyển về nháp trước."
+    );
+  }
+
+  const [hasAttempt, hasAssignment] = await Promise.all([
+    AttemptModel.exists({ examId: exam._id }),
+    AssignmentModel.exists({ examId: exam._id }),
+  ]);
+
+  if (hasAttempt) {
+    throw new BadRequestError(
+      "EXAM_HAS_ATTEMPTS",
+      "Không thể xoá đề đã có học sinh làm bài."
+    );
+  }
+
+  if (hasAssignment) {
+    throw new BadRequestError(
+      "EXAM_HAS_ASSIGNMENTS",
+      "Không thể xoá đề đã được giao cho lớp."
     );
   }
 
   await ExamModel.deleteOne({ _id: exam._id });
+}
+
+/**
+ * Reopen a closed exam. Reuses the publish validation so an exam can never be
+ * reopened in a state that could not have been published. A `closeAt` in the
+ * past is cleared, otherwise the exam would be "open" but still blocked.
+ */
+export async function reopen(
+  id: string,
+  userId: string,
+  role: string
+): Promise<{ id: string; status: ExamStatus; clearedCloseAt?: boolean }> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  if (exam.status !== "closed") {
+    throw new BadRequestError(
+      "EXAM_NOT_CLOSED",
+      "Chỉ có thể mở lại đề thi đang ở trạng thái đã đóng."
+    );
+  }
+
+  const originalCloseAt = exam.closeAt;
+  const hadPastCloseAt = Boolean(
+    originalCloseAt && originalCloseAt.getTime() <= Date.now()
+  );
+
+  if (hadPastCloseAt) {
+    exam.closeAt = undefined;
+    await exam.save();
+  }
+
+  try {
+    const result = await publish(id, userId, role);
+    return hadPastCloseAt ? { ...result, clearedCloseAt: true } : result;
+  } catch (error) {
+    if (hadPastCloseAt) {
+      exam.closeAt = originalCloseAt;
+      await exam.save();
+    }
+    throw error;
+  }
+}
+
+/**
+ * Convert a published/closed exam back to draft so its content can be edited
+ * again. Exams that already have attempts are rejected: editing them would
+ * change the exam students were graded against (the UI offers clone-to-edit).
+ */
+export async function convertToDraft(
+  id: string,
+  userId: string,
+  role: string
+): Promise<{ id: string; status: ExamStatus; clearedCloseAt?: boolean }> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  if (exam.status === "draft") {
+    return { id: exam._id.toString(), status: exam.status };
+  }
+
+  const hasAttempt = await AttemptModel.exists({ examId: exam._id });
+  if (hasAttempt) {
+    throw new BadRequestError(
+      "EXAM_HAS_ATTEMPTS",
+      "Đề đã có học sinh làm bài. Hãy nhân bản đề để chỉnh sửa."
+    );
+  }
+
+  // A closed exam normally has a past `closeAt`. Keeping it would silently
+  // block students again right after the teacher re-publishes the draft.
+  const hadPastCloseAt = Boolean(
+    exam.closeAt && exam.closeAt.getTime() <= Date.now()
+  );
+  if (hadPastCloseAt) exam.closeAt = undefined;
+
+  exam.status = "draft";
+  await exam.save();
+
+  return {
+    id: exam._id.toString(),
+    status: exam.status,
+    ...(hadPastCloseAt ? { clearedCloseAt: true } : {}),
+  };
 }
 
 export async function clone(
@@ -799,7 +924,9 @@ export async function clone(
       part: section.part,
       title: section.title,
       instructions: section.instructions,
+      instructionsDoc: section.instructionsDoc,
       passageText: section.passageText,
+      passageDoc: section.passageDoc,
       transcript: section.transcript,
       mediaIds: section.mediaIds,
       questionGroups: section.questionGroups,

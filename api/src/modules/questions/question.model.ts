@@ -56,10 +56,15 @@ export type QuestionType =
   | "writing_task_1"
   | "writing_task_2";
 
+/** Opaque ProseMirror JSON stored in Mongo (`Schema.Types.Mixed`). */
+export type RichDocValue = Record<string, unknown>;
+
 /** One answer slot stored inside a bank Question Group. */
 export interface IBankQuestionItem {
   _id: Types.ObjectId;
   prompt: string;
+  /** Rich-text JSON for the prompt; `prompt` stays as the plain-text fallback. */
+  promptDoc?: RichDocValue;
   acceptedAnswers: string[];
   points: number;
   explanation?: string;
@@ -79,6 +84,8 @@ export interface IQuestion extends mongoose.Document {
   part: number;
   groupType: QuestionGroupType;
   instructions: string;
+  /** Rich-text JSON for the group instructions. */
+  instructionsDoc?: RichDocValue;
   config: Record<string, unknown>;
   questions: IBankQuestionItem[];
   createdBy: Types.ObjectId;
@@ -89,6 +96,7 @@ export interface IQuestion extends mongoose.Document {
 const BankQuestionItemSchema = new Schema<IBankQuestionItem>(
   {
     prompt: { type: String, default: "" },
+    promptDoc: { type: Schema.Types.Mixed },
     acceptedAnswers: [{ type: String, trim: true }],
     points: { type: Number, default: 1 },
     explanation: { type: String },
@@ -103,6 +111,7 @@ const QuestionSchema = new Schema<IQuestion>(
     part: { type: Number, required: true },
     groupType: { type: String, required: true },
     instructions: { type: String, default: "" },
+    instructionsDoc: { type: Schema.Types.Mixed },
     config: { type: Schema.Types.Mixed, default: {} },
     questions: [BankQuestionItemSchema],
 

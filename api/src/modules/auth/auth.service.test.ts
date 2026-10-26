@@ -192,6 +192,55 @@ describe("single-device login (last-login-wins)", () => {
     expect(user.activeSessionId).toBe(newSid);
     expect(user.refreshSessions).toHaveLength(1);
     expect(user.refreshSessions[0].sessionId).toBe(newSid);
+    expect(result.sessionReplaced).toBe(true);
+  });
+
+  it("reports sessionReplaced=false on the very first login", async () => {
+    const user = buildStudent({ passwordHash: "hashed-password" });
+
+    vi.spyOn(UserModel, "findOne").mockResolvedValueOnce(user as never);
+    vi.spyOn(bcrypt, "compare").mockResolvedValueOnce(true as never);
+
+    const result = await login({ email: "student@example.com", password: "Password@1" });
+
+    expect(result.sessionReplaced).toBe(false);
+  });
+
+  it("reports sessionReplaced=false when the same browser reuses its session", async () => {
+    const user = buildStudent({
+      passwordHash: "hashed-password",
+      activeSessionId: SID,
+    });
+    const existingToken = signRefreshToken(user, SID);
+    user.refreshSessions = [buildSession(existingToken)];
+
+    vi.spyOn(UserModel, "findOne").mockResolvedValueOnce(user as never);
+    vi.spyOn(bcrypt, "compare").mockResolvedValueOnce(true as never);
+
+    const result = await login(
+      { email: "student@example.com", password: "Password@1" },
+      undefined,
+      existingToken
+    );
+
+    expect(result.sessionReplaced).toBe(false);
+  });
+
+  it("reports sessionReplaced=false when the previous session already expired", async () => {
+    const user = buildStudent({
+      passwordHash: "hashed-password",
+      activeSessionId: SID,
+    });
+    user.refreshSessions = [
+      buildSession("expired-token", { expiresAt: new Date(Date.now() - 60_000) }),
+    ];
+
+    vi.spyOn(UserModel, "findOne").mockResolvedValueOnce(user as never);
+    vi.spyOn(bcrypt, "compare").mockResolvedValueOnce(true as never);
+
+    const result = await login({ email: "student@example.com", password: "Password@1" });
+
+    expect(result.sessionReplaced).toBe(false);
   });
 });
 

@@ -1,12 +1,13 @@
 import mongoose from "mongoose";
 import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { escapeRegExp } from "../../common/utils/escape-regexp.js";
-import { QuestionModel, type IBankQuestionItem, type IQuestion } from "./question.model.js";
+import { QuestionModel, type IBankQuestionItem, type IQuestion, type RichDocValue } from "./question.model.js";
 import type { CreateQuestionBody, ListQuestionsQuery, UpdateQuestionBody } from "./question.validation.js";
 
 export interface SerializedBankQuestionItem {
   id: string;
   prompt: string;
+  promptDoc?: RichDocValue | null;
   acceptedAnswers: string[];
   points: number;
   explanation: string | null;
@@ -19,6 +20,7 @@ export interface SerializedBankQuestionGroup {
   part: number;
   groupType: string;
   instructions: string;
+  instructionsDoc?: RichDocValue | null;
   config: Record<string, unknown>;
   questions: SerializedBankQuestionItem[];
   questionCount: number;
@@ -47,6 +49,7 @@ function serializeItem(item: IBankQuestionItem): SerializedBankQuestionItem {
   return {
     id: item._id.toString(),
     prompt: item.prompt ?? "",
+    ...(item.promptDoc ? { promptDoc: item.promptDoc } : {}),
     acceptedAnswers: item.acceptedAnswers ?? [],
     points: item.points ?? 1,
     explanation: item.explanation ?? null,
@@ -62,6 +65,7 @@ export function serializeQuestion(question: IQuestion): SerializedBankQuestionGr
     part: question.part,
     groupType: question.groupType,
     instructions: question.instructions ?? "",
+    ...(question.instructionsDoc ? { instructionsDoc: question.instructionsDoc } : {}),
     config: (question.config ?? {}) as Record<string, unknown>,
     questions,
     questionCount: questions.length,
@@ -92,9 +96,11 @@ export async function create(
     part: data.part,
     groupType: data.groupType as IQuestion["groupType"],
     instructions: data.instructions ?? "",
+    instructionsDoc: data.instructionsDoc ?? undefined,
     config: data.config ?? {},
     questions: data.questions.map((item) => ({
       prompt: item.prompt ?? "",
+      promptDoc: item.promptDoc ?? undefined,
       acceptedAnswers: item.acceptedAnswers ?? [],
       points: item.points ?? 1,
       explanation: item.explanation,
@@ -198,10 +204,14 @@ export async function update(
   if (data.part !== undefined) patch.part = data.part;
   if (data.groupType !== undefined) patch.groupType = data.groupType;
   if (data.instructions !== undefined) patch.instructions = data.instructions;
+  if (data.instructionsDoc !== undefined) {
+    patch.instructionsDoc = data.instructionsDoc ?? undefined;
+  }
   if (data.config !== undefined) patch.config = data.config;
   if (data.questions !== undefined) {
     patch.questions = data.questions.map((item) => ({
       prompt: item.prompt ?? "",
+      promptDoc: item.promptDoc ?? undefined,
       acceptedAnswers: item.acceptedAnswers ?? [],
       points: item.points ?? 1,
       explanation: item.explanation,

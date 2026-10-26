@@ -9,10 +9,13 @@ import { canStudentAccessExam } from "./exam.access.js";
 import {
   assertOwnership,
   clone,
+  convertToDraft,
   getById,
   list,
   mapSections,
   publish,
+  remove,
+  reopen,
   unpublish,
   update,
   updateMetadata,
@@ -547,5 +550,223 @@ describe("closed exam student access", () => {
         createdBy: new mongoose.Types.ObjectId(),
       } as never)
     ).resolves.toBe(false);
+  });
+});
+
+describe("exam lifecycle: delete / reopen / convert to draft", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+
+  function buildPublishableExam(overrides: Record<string, unknown> = {}) {
+    return {
+      _id: examId,
+      createdBy: teacherId,
+      durationMinutes: 60,
+      sections: [
+        {
+          skill: "listening",
+          questionGroups: [
+            {
+              groupType: "short_answer",
+              questions: [
+                {
+                  questionNumber: 1,
+                  prompt: "Q1",
+                  acceptedAnswers: ["answer"],
+                  points: 40,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      save: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  it("deletes a draft exam without attempts or assignments", async () => {
+    const mockExam = { _id: examId, createdBy: teacherId, status: "draft" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+    const deleteSpy = vi
+      .spyOn(ExamModel, "deleteOne")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+
+    await remove(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(deleteSpy).toHaveBeenCalledWith({ _id: examId });
+  });
+
+  it("deletes a closed exam without attempts or assignments", async () => {
+    const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+    const deleteSpy = vi
+      .spyOn(ExamModel, "deleteOne")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+
+    await remove(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(deleteSpy).toHaveBeenCalledWith({ _id: examId });
+  });
+
+  it("blocks deleting a published exam", async () => {
+    const mockExam = { _id: examId, createdBy: teacherId, status: "published" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(
+      remove(examId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow("Đề đã xuất bản không thể xoá trực tiếp");
+  });
+
+  it("blocks deleting an exam with student attempts", async () => {
+    const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+
+    await expect(
+      remove(examId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow("Không thể xoá đề đã có học sinh làm bài.");
+  });
+
+  it("blocks deleting an exam assigned to a class", async () => {
+    const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
+
+    await expect(
+      remove(examId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow("Không thể xoá đề đã được giao cho lớp.");
+  });
+
+  it("reopens a closed exam as published", async () => {
+    const mockExam = buildPublishableExam({ status: "closed" });
+    vi.spyOn(ExamModel, "findById")
+      .mockResolvedValueOnce(mockExam as never)
+      .mockResolvedValueOnce(mockExam as never);
+
+    const result = await reopen(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result.status).toBe("published");
+    expect(result.clearedCloseAt).toBeUndefined();
+    expect(mockExam.status).toBe("published");
+  });
+
+  it("clears a past closeAt when reopening", async () => {
+    const mockExam = buildPublishableExam({
+      status: "closed",
+      closeAt: new Date(Date.now() - 60_000),
+    });
+    vi.spyOn(ExamModel, "findById")
+      .mockResolvedValueOnce(mockExam as never)
+      .mockResolvedValueOnce(mockExam as never);
+
+    const result = await reopen(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result.status).toBe("published");
+    expect(result.clearedCloseAt).toBe(true);
+    expect(mockExam.closeAt).toBeUndefined();
+  });
+
+  it("refuses to reopen an exam that is not closed", async () => {
+    const mockExam = buildPublishableExam({ status: "published" });
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(
+      reopen(examId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow("Chỉ có thể mở lại đề thi đang ở trạng thái đã đóng.");
+  });
+
+  it("converts a published exam to draft when it has no attempts", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "published",
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+
+    const result = await convertToDraft(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result).toEqual({ id: examId.toString(), status: "draft" });
+    expect(mockExam.status).toBe("draft");
+    expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("blocks converting an exam that already has attempts", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "published",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
+
+    await expect(
+      convertToDraft(examId.toString(), teacherId.toString(), "teacher")
+    ).rejects.toThrow("Đề đã có học sinh làm bài. Hãy nhân bản đề để chỉnh sửa.");
+    expect(mockExam.save).not.toHaveBeenCalled();
+  });
+
+  it("treats converting a draft exam as a no-op", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "draft",
+      save: vi.fn(),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    const result = await convertToDraft(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result).toEqual({ id: examId.toString(), status: "draft" });
+    expect(mockExam.save).not.toHaveBeenCalled();
+  });
+
+  it("clears a past closeAt when converting a closed exam to draft", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "closed",
+      closeAt: new Date(Date.now() - 60_000),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+
+    const result = await convertToDraft(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result).toEqual({
+      id: examId.toString(),
+      status: "draft",
+      clearedCloseAt: true,
+    });
+    expect(mockExam.closeAt).toBeUndefined();
+    expect(mockExam.status).toBe("draft");
+  });
+
+  it("keeps a future closeAt when converting a published exam to draft", async () => {
+    const future = new Date(Date.now() + 3_600_000);
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "published",
+      closeAt: future,
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+
+    const result = await convertToDraft(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result).toEqual({ id: examId.toString(), status: "draft" });
+    expect(mockExam.closeAt).toBe(future);
   });
 });

@@ -25,6 +25,87 @@ const QuestionGroupTypeEnum = z.enum([
   "writing_task_2",
 ]);
 
+// === Rich text (ProseMirror JSON) ===
+// Stored as Mixed in Mongo. The schema is intentionally permissive about node
+// types (the editor may add new extensions) but enforces size/depth limits so a
+// malformed payload cannot bloat the document.
+
+const MAX_RICH_DOC_BYTES = 200_000;
+const MAX_RICH_DOC_NODES = 5_000;
+const MAX_RICH_DOC_DEPTH = 20;
+
+interface RichMarkInput {
+  type: string;
+  attrs?: Record<string, unknown>;
+}
+
+interface RichNodeInput {
+  type: string;
+  attrs?: Record<string, unknown>;
+  content?: RichNodeInput[];
+  marks?: RichMarkInput[];
+  text?: string;
+}
+
+const RichMarkSchema = z.object({
+  type: z.string().min(1).max(32),
+  attrs: z.record(z.string(), z.unknown()).optional(),
+});
+
+const RichNodeSchema: z.ZodType<RichNodeInput> = z.lazy(() =>
+  z.object({
+    type: z.string().min(1).max(32),
+    attrs: z.record(z.string(), z.unknown()).optional(),
+    content: z.array(RichNodeSchema).max(2_000).optional(),
+    marks: z.array(RichMarkSchema).max(16).optional(),
+    text: z.string().max(50_000).optional(),
+  })
+) as z.ZodType<RichNodeInput>;
+
+function measureRichDoc(doc: RichNodeInput): {
+  nodes: number;
+  depth: number;
+} {
+  let nodes = 0;
+  let depth = 0;
+
+  const visit = (node: RichNodeInput, level: number) => {
+    nodes += 1;
+    depth = Math.max(depth, level);
+    for (const child of node.content ?? []) visit(child, level + 1);
+  };
+
+  visit(doc, 1);
+  return { nodes, depth };
+}
+
+export const RichDocSchema = z
+  .object({
+    type: z.literal("doc"),
+    content: z.array(RichNodeSchema).max(2_000).optional(),
+  })
+  .superRefine((doc, ctx) => {
+    const { nodes, depth } = measureRichDoc(doc as RichNodeInput);
+    if (nodes > MAX_RICH_DOC_NODES) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Nội dung định dạng quá lớn (tối đa ${MAX_RICH_DOC_NODES} phần tử).`,
+      });
+    }
+    if (depth > MAX_RICH_DOC_DEPTH) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Nội dung định dạng lồng quá sâu (tối đa ${MAX_RICH_DOC_DEPTH} cấp).`,
+      });
+    }
+    if (JSON.stringify(doc).length > MAX_RICH_DOC_BYTES) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Nội dung định dạng quá lớn (tối đa 200KB).",
+      });
+    }
+  });
+
 export const QuestionGroupConfigSchema = z
   .object({
     options: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
@@ -34,6 +115,7 @@ export const QuestionGroupConfigSchema = z
     featuresPool: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
     endingsPool: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
     allowReuse: z.boolean().optional(),
+    allowChangeAnswer: z.boolean().optional(),
     template: z.string().optional(),
     maxWords: z.number().int().min(1).optional(),
     allowNumbers: z.boolean().optional(),
@@ -73,6 +155,7 @@ const QuestionItemInputSchema = z.object({
   _id: z.string().optional().nullable(),
   questionNumber: z.number().int().min(1),
   prompt: z.string().default(""),
+  promptDoc: RichDocSchema.optional().nullable(),
   acceptedAnswers: z.array(z.string()).default([]),
   points: z.number().int("Điểm phải là số nguyên").min(1).max(10).default(1),
   explanation: z.string().optional().nullable(),
@@ -83,6 +166,7 @@ const QuestionGroupInputSchema = z.object({
   _id: z.string().optional().nullable(),
   groupType: QuestionGroupTypeEnum,
   instructions: z.string().default(""),
+  instructionsDoc: RichDocSchema.optional().nullable(),
   config: QuestionGroupConfigSchema,
   questions: z.array(QuestionItemInputSchema).default([]),
 });
@@ -93,7 +177,9 @@ const ExamSectionInputSchema = z.object({
   part: z.number().int().min(1).max(4),
   title: z.string().optional().default(""),
   instructions: z.string().optional().nullable(),
+  instructionsDoc: RichDocSchema.optional().nullable(),
   passageText: z.string().optional().nullable(),
+  passageDoc: RichDocSchema.optional().nullable(),
   transcript: z.string().optional().nullable(),
   mediaIds: z.array(z.string()).optional(),
   questionGroups: z.array(QuestionGroupInputSchema).optional().default([]),

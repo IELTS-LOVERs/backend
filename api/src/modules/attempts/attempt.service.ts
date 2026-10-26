@@ -20,6 +20,7 @@ import {
   type IExam,
   type IQuestionGroup,
   type IExamPostSubmissionResources,
+  type RichDocValue,
 } from "../exams/exam.model.js";
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
@@ -47,6 +48,7 @@ export interface CandidateQuestionItem {
   id: string;
   questionNumber: number;
   prompt: string;
+  promptDoc?: RichDocValue | null;
   points: number;
   mediaIds: string[];
   media: CandidateMediaItem[];
@@ -56,6 +58,7 @@ export interface CandidateQuestionGroup {
   id: string;
   groupType: QuestionGroupType;
   instructions: string;
+  instructionsDoc?: RichDocValue | null;
   config: Record<string, unknown>;
   /** Resolved group-level image (config.imageMediaId) with a presigned URL. */
   media: CandidateMediaItem[];
@@ -68,7 +71,9 @@ export interface CandidateExamSection {
   part: number;
   title: string;
   instructions: string | null;
+  instructionsDoc?: RichDocValue | null;
   passageText: string | null;
+  passageDoc?: RichDocValue | null;
   transcript: string | null;
   mediaIds: string[];
   media: CandidateMediaItem[];
@@ -180,7 +185,9 @@ export interface RawPopulatedSection {
   part: number;
   title: string;
   instructions?: string;
+  instructionsDoc?: RichDocValue;
   passageText?: string;
+  passageDoc?: RichDocValue;
   transcript?: string;
   mediaIds?: unknown[];
   questionGroups?: IQuestionGroup[];
@@ -245,11 +252,12 @@ export function toCandidateMediaItem(
 export const DEFAULT_MEDIA_PRESIGN_TTL_SECONDS = 15 * 60;
 
 /**
- * TTL for exam media: enough to cover the whole attempt plus 30 minutes of
- * slack, so an `<audio>` URL stays valid from start to (grace-period) submit.
+ * TTL for exam media: enough to cover the whole attempt plus 6 hours of slack,
+ * so an image/audio URL stays valid from start to (grace-period) submit and
+ * across a mobile tab being backgrounded or briefly losing network.
  */
 export function examMediaPresignTtl(durationMinutes: number): number {
-  return durationMinutes * 60 + 1800;
+  return durationMinutes * 60 + 6 * 3600;
 }
 
 /**
@@ -414,6 +422,7 @@ export const GROUP_CONFIG_WHITELIST = new Set<string>([
   "featuresPool",
   "endingsPool",
   "allowReuse",
+  "allowChangeAnswer",
   "template",
   "maxWords",
   "allowNumbers",
@@ -483,6 +492,7 @@ export function buildCandidateExam(
             id: group._id?.toString() ?? "",
             groupType: group.groupType,
             instructions: group.instructions ?? "",
+            instructionsDoc: group.instructionsDoc ?? null,
             config: stripGroupConfig(group.config ?? {}),
             media: groupMedia,
             questions: (group.questions ?? []).map((q) => {
@@ -494,6 +504,7 @@ export function buildCandidateExam(
                 id: q._id?.toString() ?? "",
                 questionNumber: q.questionNumber,
                 prompt: q.prompt ?? "",
+                promptDoc: q.promptDoc ?? null,
                 points: q.points ?? 1,
                 mediaIds: qMediaIds,
                 media: qMedia,
@@ -509,7 +520,9 @@ export function buildCandidateExam(
         part: section.part,
         title: section.title,
         instructions: section.instructions ?? null,
+        instructionsDoc: section.instructionsDoc ?? null,
         passageText: section.passageText ?? null,
+        passageDoc: section.passageDoc ?? null,
         transcript: section.transcript ?? null,
         mediaIds: sectionMediaIds,
         media: sectionMedia,

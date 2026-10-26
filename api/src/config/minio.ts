@@ -1,5 +1,6 @@
 import { Client } from "minio";
 import { env } from "./env.js";
+import { logger } from "../common/utils/logger.js";
 
 export const minioClient = new Client({
   endPoint: env.MINIO_ENDPOINT,
@@ -45,6 +46,46 @@ export const presignConnection: PresignConnection = resolvePresignConnection({
   publicPort: env.MINIO_PUBLIC_PORT,
   publicUseSSL: env.MINIO_PUBLIC_USE_SSL,
 });
+
+/**
+ * Mobile devices can only load media if the public host is reachable from the
+ * internet and served over HTTPS (mixed content is blocked). Surface obvious
+ * misconfiguration at boot instead of leaving it to "images sometimes fail".
+ */
+function warnAboutPublicMediaConfig(): void {
+  if (env.NODE_ENV !== "production") return;
+
+  const localHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0"]);
+  if (
+    env.MINIO_PUBLIC_ENDPOINT &&
+    localHosts.has(env.MINIO_PUBLIC_ENDPOINT.toLowerCase())
+  ) {
+    logger.warn("media.public_endpoint_local", {
+      minioPublicEndpoint: env.MINIO_PUBLIC_ENDPOINT,
+    });
+  }
+
+  if (env.PUBLIC_MEDIA_URL.startsWith("http://")) {
+    logger.warn("media.public_media_url_insecure", {
+      publicMediaUrl: env.PUBLIC_MEDIA_URL,
+    });
+  }
+
+  try {
+    const host = new URL(env.PUBLIC_MEDIA_URL).hostname.toLowerCase();
+    if (localHosts.has(host)) {
+      logger.warn("media.public_media_url_local", {
+        publicMediaUrl: env.PUBLIC_MEDIA_URL,
+      });
+    }
+  } catch {
+    logger.warn("media.public_media_url_invalid", {
+      publicMediaUrl: env.PUBLIC_MEDIA_URL,
+    });
+  }
+}
+
+warnAboutPublicMediaConfig();
 
 const presignUsesInternalEndpoint =
   presignConnection.endPoint === env.MINIO_ENDPOINT &&

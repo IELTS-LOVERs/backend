@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CreateExamSchema, ListExamsSchema, UpdateExamSchema } from "./exam.validation.js";
+import {
+  CreateExamSchema,
+  ListExamsSchema,
+  QuestionGroupConfigSchema,
+  UpdateExamSchema,
+} from "./exam.validation.js";
 
 const validBody = {
   title: "IELTS Academic Mock Test 01",
@@ -162,6 +167,26 @@ describe("ListExamsSchema", () => {
       expect(result.data.query.status).toBe("draft");
       expect(result.data.query.page).toBe(2);
       expect(result.data.query.limit).toBe(5);
+    }
+  });
+});
+
+describe("QuestionGroupConfigSchema allowChangeAnswer", () => {
+  it("accepts allowChangeAnswer: false", () => {
+    const result = QuestionGroupConfigSchema.safeParse({ allowChangeAnswer: false });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.allowChangeAnswer).toBe(false);
+    }
+  });
+
+  it("accepts allowChangeAnswer: true", () => {
+    const result = QuestionGroupConfigSchema.safeParse({ allowChangeAnswer: true });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.allowChangeAnswer).toBe(true);
     }
   });
 });

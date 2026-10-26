@@ -29,10 +29,15 @@ export const DEFAULT_BAND_CONVERSION: IBandConversion = {
 // Deprecated alias for backwards compatibility
 export type ExamType = ExamKind;
 
+/** Opaque ProseMirror JSON stored in Mongo (`Schema.Types.Mixed`). */
+export type RichDocValue = Record<string, unknown>;
+
 export interface IQuestionItem {
   _id: Types.ObjectId;
   questionNumber: number;
   prompt: string;
+  /** Rich-text JSON for the prompt; `prompt` stays as the plain-text fallback. */
+  promptDoc?: RichDocValue;
   acceptedAnswers: string[];
   points: number;
   explanation?: string;
@@ -43,6 +48,8 @@ export interface IQuestionGroup {
   _id: Types.ObjectId;
   groupType: QuestionGroupType;
   instructions: string;
+  /** Rich-text JSON for the group instructions. */
+  instructionsDoc?: RichDocValue;
   config: Record<string, unknown>;
   questions: IQuestionItem[];
 }
@@ -53,7 +60,9 @@ export interface IExamSection {
   part: number;
   title?: string;
   instructions?: string;
+  instructionsDoc?: RichDocValue;
   passageText?: string;
+  passageDoc?: RichDocValue;
   transcript?: string;
   mediaIds?: Types.ObjectId[];
   questionGroups: IQuestionGroup[];
@@ -118,6 +127,7 @@ const QuestionItemSchema = new Schema<IQuestionItem>(
   {
     questionNumber: { type: Number, required: true },
     prompt: { type: String, default: "" },
+    promptDoc: { type: Schema.Types.Mixed },
     acceptedAnswers: [{ type: String, trim: true }],
     points: { type: Number, default: 1 },
     explanation: { type: String },
@@ -130,6 +140,7 @@ const QuestionGroupSchema = new Schema<IQuestionGroup>(
   {
     groupType: { type: String, required: true },
     instructions: { type: String, default: "" },
+    instructionsDoc: { type: Schema.Types.Mixed },
     config: { type: Schema.Types.Mixed, default: {} },
     questions: [QuestionItemSchema],
   },
@@ -142,7 +153,9 @@ const ExamSectionSchema = new Schema<IExamSection>(
     part: { type: Number, required: true },
     title: { type: String, default: "" },
     instructions: { type: String },
+    instructionsDoc: { type: Schema.Types.Mixed },
     passageText: { type: String },
+    passageDoc: { type: Schema.Types.Mixed },
     transcript: { type: String },
     mediaIds: [{ type: Schema.Types.ObjectId, ref: "Media" }],
     questionGroups: [QuestionGroupSchema],

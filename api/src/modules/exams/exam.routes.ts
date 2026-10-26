@@ -29,6 +29,8 @@ router.post("/:id/clone", examController.cloneExam);
 router.patch("/:id/publish", examController.publishExam);
 router.patch("/:id/unpublish", examController.unpublishExam);
 router.patch("/:id/close", examController.closeExam);
+router.patch("/:id/reopen", examController.reopenExam);
+router.patch("/:id/to-draft", examController.convertExamToDraft);
 
 export { router as examRoutes };
 export default router;
