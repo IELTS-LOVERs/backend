@@ -127,6 +127,11 @@ export interface ExamListItem {
   hasAttempts?: boolean;
   /** True when the exam is assigned to at least one class (teacher view). */
   hasAssignments?: boolean;
+  /** Total attempts ever started on this exam (teacher view). */
+  attemptsCount?: number;
+  /** Attempts currently in progress (teacher view). */
+  activeAttemptsCount?: number;
+  contentRevision?: number;
 }
 
 export interface SerializedQuestionItem {
@@ -190,6 +195,11 @@ export interface ExamDetail {
   hasAttempts?: boolean;
   /** True when the exam is assigned to at least one class (teacher view). */
   hasAssignments?: boolean;
+  /** Total attempts ever started on this exam (teacher view). */
+  attemptsCount?: number;
+  /** Attempts currently in progress (teacher view). */
+  activeAttemptsCount?: number;
+  contentRevision: number;
   sections: ExamSectionDetail[];
   type?: ExamKind;
 }
@@ -315,6 +325,71 @@ export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
   // Question numbers are display data; always persist the canonical per-skill
   // sequence so the candidate view, palette and template blanks stay aligned.
   return normalizeExamSectionNumbering(mapped).sections;
+}
+
+/**
+ * Deterministic JSON with sorted object keys.
+ *
+ * `JSON.stringify` preserves insertion order, so the same config could produce
+ * different strings when the client re-serialises it. A false difference would
+ * bump `contentRevision` on every metadata save and spam students with update
+ * notifications.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Stable signature of the *candidate-visible* exam content.
+ *
+ * Used to decide whether `contentRevision` must be bumped. Numbering is
+ * normalized first, so a legacy non-canonical draft that is re-saved without
+ * real edits does not look like a content change.
+ */
+function examContentSignature(sections: IExamSection[] | undefined): string {
+  const normalized = normalizeExamSectionNumbering(sections ?? []).sections;
+  return stableStringify(
+    normalized.map((section) => ({
+      id: section._id?.toString() ?? null,
+      skill: section.skill,
+      part: section.part,
+      title: section.title ?? "",
+      instructions: section.instructions ?? "",
+      instructionsDoc: section.instructionsDoc ?? null,
+      passageText: section.passageText ?? "",
+      passageDoc: section.passageDoc ?? null,
+      transcript: section.transcript ?? "",
+      mediaIds: (section.mediaIds ?? []).map(extractMediaId).sort(),
+      questionGroups: (section.questionGroups ?? []).map((group) => ({
+        id: group._id?.toString() ?? null,
+        groupType: group.groupType,
+        instructions: group.instructions ?? "",
+        instructionsDoc: group.instructionsDoc ?? null,
+        config: group.config ?? {},
+        questions: (group.questions ?? []).map((question) => ({
+          id: question._id?.toString() ?? null,
+          questionNumber: question.questionNumber,
+          prompt: question.prompt ?? "",
+          promptDoc: question.promptDoc ?? null,
+          acceptedAnswers: question.acceptedAnswers ?? [],
+          points: question.points ?? 1,
+          explanation: question.explanation ?? null,
+          mediaIds: (question.mediaIds ?? []).map(extractMediaId).sort(),
+        })),
+      })),
+    }))
+  );
 }
 
 function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
@@ -505,16 +580,36 @@ export async function list(
 
   // Teacher/admin views need to know whether each exam can be deleted or edited.
   // One extra pair of queries per page (never per row), skipped for students.
-  const attemptedIds = new Set<string>();
+  const attemptStats = new Map<string, { total: number; active: number }>();
   const assignedIds = new Set<string>();
 
   if (role !== "student" && exams.length > 0) {
     const examIds = exams.map((exam) => exam._id);
-    const [attempted, assigned] = await Promise.all([
-      AttemptModel.distinct("examId", { examId: { $in: examIds } }),
+    const [attemptRows, assigned] = await Promise.all([
+      AttemptModel.aggregate<{
+        _id: Types.ObjectId;
+        total: number;
+        active: number;
+      }>([
+        { $match: { examId: { $in: examIds } } },
+        {
+          $group: {
+            _id: "$examId",
+            total: { $sum: 1 },
+            active: {
+              $sum: { $cond: [{ $eq: ["$status", "in_progress"] }, 1, 0] },
+            },
+          },
+        },
+      ]),
       AssignmentModel.distinct("examId", { examId: { $in: examIds } }),
     ]);
-    attempted.forEach((id) => attemptedIds.add(String(id)));
+    for (const row of attemptRows) {
+      attemptStats.set(row._id.toString(), {
+        total: row.total,
+        active: row.active,
+      });
+    }
     assigned.forEach((id) => assignedIds.add(String(id)));
   }
 
@@ -539,10 +634,13 @@ export async function list(
         type: exam.kind ?? "mock",
         ...(role !== "student"
           ? {
-              hasAttempts: attemptedIds.has(id),
+              hasAttempts: attemptStats.has(id),
               hasAssignments: assignedIds.has(id),
+              attemptsCount: attemptStats.get(id)?.total ?? 0,
+              activeAttemptsCount: attemptStats.get(id)?.active ?? 0,
             }
           : {}),
+        contentRevision: exam.contentRevision ?? 0,
       };
     }),
     page,
@@ -590,6 +688,7 @@ export async function getById(
           : exam.scoringMode ?? "band",
       bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
       curriculum: exam.curriculum,
+      contentRevision: exam.contentRevision ?? 0,
       type: exam.kind ?? "mock",
     };
   }
@@ -598,8 +697,9 @@ export async function getById(
     throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
   }
 
-  const [hasAttempts, hasAssignments] = await Promise.all([
-    AttemptModel.exists({ examId: exam._id }),
+  const [attemptsCount, activeAttemptsCount, hasAssignments] = await Promise.all([
+    AttemptModel.countDocuments({ examId: exam._id }),
+    AttemptModel.countDocuments({ examId: exam._id, status: "in_progress" }),
     AssignmentModel.exists({ examId: exam._id }),
   ]);
 
@@ -653,8 +753,11 @@ export async function getById(
     postSubmissionResources: exam.postSubmissionResources,
     openAt: exam.openAt ?? null,
     closeAt: exam.closeAt ?? null,
-    hasAttempts: Boolean(hasAttempts),
+    hasAttempts: attemptsCount > 0,
     hasAssignments: Boolean(hasAssignments),
+    attemptsCount,
+    activeAttemptsCount,
+    contentRevision: exam.contentRevision ?? 0,
     sections: normalizedSections,
     type: exam.kind ?? "mock",
   };
@@ -667,13 +770,7 @@ export async function update(
   role: string
 ): Promise<void> {
   const exam = await findOwnedExam(id, userId, role);
-
-  if (exam.status !== "draft") {
-    throw new BadRequestError(
-      "EXAM_CANNOT_EDIT_PUBLISHED",
-      "Không thể sửa hoặc xóa đề thi đã xuất bản."
-    );
-  }
+  const previousContentSignature = examContentSignature(exam.sections);
 
   const newKind = data.kind ?? data.type;
   if (newKind !== undefined && newKind !== exam.kind) {
@@ -733,7 +830,30 @@ export async function update(
   if (data.openAt !== undefined) exam.openAt = data.openAt ? new Date(data.openAt) : undefined;
   if (data.closeAt !== undefined) exam.closeAt = data.closeAt ? new Date(data.closeAt) : undefined;
 
+  // Only real content changes (questions/answers/passages/media/order) bump the
+  // revision. Metadata edits (title, dates, banner…) must not disturb students
+  // who are currently taking the exam.
+  const contentChanged =
+    examContentSignature(exam.sections) !== previousContentSignature;
+
+  if (contentChanged) {
+    if (exam.status !== "draft") {
+      // Published/closed exams are live: the new content must still be a valid
+      // exam, otherwise the old content keeps serving students.
+      validateExamReadyForPublish(exam);
+    }
+    exam.contentRevision = (exam.contentRevision ?? 0) + 1;
+  }
+
   await exam.save();
+
+  if (contentChanged) {
+    logger.info("exam.content_updated", {
+      examId: exam._id.toString(),
+      status: exam.status,
+      contentRevision: exam.contentRevision,
+    });
+  }
 }
 
 /** Allow editing metadata (title, description, open/close times) on published exams */
@@ -1113,13 +1233,7 @@ export function countExamPoints(exam: Pick<IExam, "sections">): number {
   return count;
 }
 
-export async function publish(
-  id: string,
-  userId: string,
-  role: string
-): Promise<{ id: string; status: ExamStatus }> {
-  const exam = await findOwnedExam(id, userId, role);
-
+export function validateExamReadyForPublish(exam: IExam): void {
   // Heal legacy drafts on publish: numbering is part of the candidate contract.
   const normalized = normalizeExamSectionNumbering(exam.sections);
   if (normalized.changed) exam.sections = normalized.sections;
@@ -1154,24 +1268,23 @@ export async function publish(
       );
     }
 
-    for (const practiceSection of exam.sections) {
-      if (practiceSection.skill !== "listening" && practiceSection.skill !== "reading") {
-        throw new BadRequestError(
-          "PRACTICE_INVALID_SKILL",
-          "Bài luyện tập chỉ hỗ trợ kỹ năng Listening hoặc Reading."
-        );
-      }
-    }
+    // Practice supports every IELTS skill, including Writing. Writing answers
+    // are graded by the teacher, so they skip the answer-key checks below.
 
+    // The curriculum "part" only names a Listening/Reading part. Writing
+    // practice (Task 1 or Task 2) is not tied to that numbering, so a
+    // mismatch is not an error there.
+    const curriculumSection = exam.sections[0];
     if (
       exam.curriculum?.part !== undefined &&
       exam.sections.length === 1 &&
-      exam.sections[0].part !== undefined &&
-      exam.curriculum.part !== exam.sections[0].part
+      curriculumSection.part !== undefined &&
+      curriculumSection.skill !== "writing" &&
+      exam.curriculum.part !== curriculumSection.part
     ) {
       throw new BadRequestError(
         "CURRICULUM_PART_MISMATCH",
-        `Phần curriculum.part (${exam.curriculum.part}) phải khớp với phần thi (${exam.sections[0].part}).`
+        `Phần curriculum.part (${exam.curriculum.part}) phải khớp với phần thi (${curriculumSection.part}).`
       );
     }
   }
@@ -1243,6 +1356,17 @@ export async function publish(
       });
     }
   }
+
+}
+
+export async function publish(
+  id: string,
+  userId: string,
+  role: string
+): Promise<{ id: string; status: ExamStatus }> {
+  const exam = await findOwnedExam(id, userId, role);
+
+  validateExamReadyForPublish(exam);
 
   exam.status = "published";
   await exam.save();

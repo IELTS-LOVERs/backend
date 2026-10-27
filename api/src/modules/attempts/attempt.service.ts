@@ -34,6 +34,7 @@ import {
   type AttemptStatus,
   type IAttempt,
   type IAttemptAnswer,
+  type IAttemptResultDetail,
   type IAttemptScores,
 } from "./attempt.model.js";
 import type { GetMyAttemptsQuery } from "./attempt.validation.js";
@@ -98,6 +99,8 @@ export interface StartAttemptResult {
   remainingSeconds: number;
   status: AttemptStatus;
   exam: CandidateExam;
+  /** Current content revision of the exam (see `Exam.contentRevision`). */
+  revision: number;
 }
 
 export interface RecoveryAnswer {
@@ -111,6 +114,21 @@ export interface AttemptRecoveryResult {
   remainingSeconds: number;
   answers: RecoveryAnswer[];
   exam: CandidateExam;
+  /** Current content revision of the exam (see `Exam.contentRevision`). */
+  revision: number;
+}
+
+export interface AttemptRevisionResult {
+  revision: number;
+  status: AttemptStatus;
+  remainingSeconds: number;
+}
+
+export interface AttemptExamResult {
+  exam: CandidateExam;
+  revision: number;
+  remainingSeconds: number;
+  updatedAt: Date;
 }
 
 export interface AutosaveResult {
@@ -130,10 +148,15 @@ export interface ResultQuestionDetail {
   questionId: string;
   questionNumber?: number;
   groupType?: string;
+  skill?: "listening" | "reading" | "writing";
   studentAnswer: string | null;
   acceptedAnswers: string[];
   isCorrect: boolean;
   explanation: string | null;
+  /** Maximum points of the question at snapshot time. */
+  points?: number;
+  /** Question prompt frozen at submit time (survives later exam edits). */
+  prompt?: string;
 }
 
 export interface AttemptWritingReview {
@@ -651,6 +674,75 @@ export function gradeGroupedQuestions(
   return gradeGroupedQuestionsDetailed(answers, questions).rawScore;
 }
 
+export interface BuiltResultSnapshot {
+  details: IAttemptResultDetail[];
+  questionCount: number;
+  totalPoints: number;
+}
+
+/**
+ * Build the immutable result snapshot for an attempt.
+ *
+ * Numbering is normalized first so the snapshot matches what the candidate saw
+ * (canonical per-skill numbering). `questionCount`/`totalPoints` are recomputed
+ * here because the exam may have changed between start and submit.
+ */
+export function buildResultDetails(
+  examObj: RawExamObject,
+  answers: Pick<IAttemptAnswer, "questionId" | "value">[]
+): BuiltResultSnapshot {
+  const sections = normalizeExamSectionNumbering(examObj.sections ?? []).sections;
+  const answerByQuestionId = new Map(
+    answers.map((answer) => [answer.questionId.toString(), answer.value])
+  );
+  const details: IAttemptResultDetail[] = [];
+  let questionCount = 0;
+  let totalPoints = 0;
+
+  for (const section of sections) {
+    for (const group of section.questionGroups ?? []) {
+      for (const question of group.questions ?? []) {
+        const studentAnswer =
+          answerByQuestionId.get(question._id.toString()) ?? null;
+        const acceptedAnswers = question.acceptedAnswers ?? [];
+
+        // Writing has no answer key: it is graded by a teacher later, so it is
+        // kept out of the correct/wrong counters instead of counting as wrong.
+        const isWriting = section.skill === "writing";
+
+        let isCorrect = false;
+        if (!isWriting && studentAnswer !== null) {
+          const withinWordLimit =
+            !shouldEnforceWordLimit(group.groupType) ||
+            checkWordLimit(studentAnswer, group.config ?? {});
+          isCorrect =
+            withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+        }
+
+        if (!isWriting) {
+          questionCount += 1;
+          totalPoints += question.points ?? 1;
+        }
+
+        details.push({
+          questionId: question._id,
+          questionNumber: question.questionNumber,
+          groupType: group.groupType,
+          skill: section.skill,
+          studentAnswer,
+          acceptedAnswers,
+          isCorrect,
+          explanation: question.explanation ?? null,
+          prompt: question.prompt ?? "",
+          points: question.points ?? 1,
+        });
+      }
+    }
+  }
+
+  return { details, questionCount, totalPoints };
+}
+
 function serializeScores(scores: IAttemptScores): IAttemptScores {
   return {
     listeningRaw: scores.listeningRaw,
@@ -689,7 +781,11 @@ async function findOwnedAttempt(attemptId: string, studentId: string): Promise<I
   return attempt;
 }
 
-function serializeStartResult(attempt: IAttempt, exam: CandidateExam): StartAttemptResult {
+function serializeStartResult(
+  attempt: IAttempt,
+  exam: CandidateExam,
+  revision: number
+): StartAttemptResult {
   return {
     attemptId: attempt._id.toString(),
     examId: attempt.examId.toString(),
@@ -698,6 +794,7 @@ function serializeStartResult(attempt: IAttempt, exam: CandidateExam): StartAtte
     remainingSeconds: computeRemainingSeconds(attempt.expiresAt),
     status: attempt.status,
     exam,
+    revision,
   };
 }
 
@@ -833,7 +930,8 @@ export async function startAttempt(
   if (existingAttempt) {
     return serializeStartResult(
       existingAttempt,
-      applyQuestionOrder(candidateExam, existingAttempt.questionOrder ?? [])
+      applyQuestionOrder(candidateExam, existingAttempt.questionOrder ?? []),
+      populatedExam.contentRevision ?? 0
     );
   }
 
@@ -875,7 +973,11 @@ export async function startAttempt(
       totalPoints,
     });
 
-    return serializeStartResult(attempt, applyQuestionOrder(candidateExam, questionOrder));
+    return serializeStartResult(
+      attempt,
+      applyQuestionOrder(candidateExam, questionOrder),
+      populatedExam.contentRevision ?? 0
+    );
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       const concurrentAttempt = await AttemptModel.findOne({
@@ -887,7 +989,8 @@ export async function startAttempt(
       if (concurrentAttempt) {
         return serializeStartResult(
           concurrentAttempt,
-          applyQuestionOrder(candidateExam, concurrentAttempt.questionOrder ?? [])
+          applyQuestionOrder(candidateExam, concurrentAttempt.questionOrder ?? []),
+          populatedExam.contentRevision ?? 0
         );
       }
     }
@@ -930,6 +1033,9 @@ export async function finalizeAttempt(
   const rawMode = scoringMode === "raw";
   const bandConversion =
     attempt.bandConversionSnapshot ?? populatedExam.bandConversion;
+
+  // Freeze the result now: the live exam may be edited after submission.
+  const snapshot = buildResultDetails(examObj, attempt.answers);
 
   let correctCount = 0;
   let wrongCount = 0;
@@ -992,6 +1098,9 @@ export async function finalizeAttempt(
         correctCount,
         wrongCount,
         blankCount,
+        resultDetails: snapshot.details,
+        questionCount: snapshot.questionCount,
+        totalPoints: snapshot.totalPoints,
       },
     },
     { new: true }
@@ -1017,6 +1126,9 @@ export async function finalizeAttempt(
   attempt.status = targetStatus;
   attempt.submittedAt = submittedAt;
   attempt.scores = updatedAttempt.scores;
+  attempt.resultDetails = updatedAttempt.resultDetails;
+  attempt.questionCount = updatedAttempt.questionCount;
+  attempt.totalPoints = updatedAttempt.totalPoints;
 
   logger.info("attempt.finalized", {
     attemptId: updatedAttempt._id.toString(),
@@ -1070,6 +1182,67 @@ export async function getAttemptForRecovery(
       ),
       attempt.questionOrder ?? []
     ),
+    revision: populatedExam.contentRevision ?? 0,
+  };
+}
+
+/**
+ * Lightweight polling endpoint for students currently taking the exam.
+ * Returns only the content version, so the client can avoid downloading the
+ * full exam on every tick.
+ */
+export async function getAttemptRevision(
+  attemptId: string,
+  studentId: string
+): Promise<AttemptRevisionResult> {
+  const attempt = await findOwnedAttempt(attemptId, studentId);
+  const exam = await ExamModel.findById(attempt.examId).select("contentRevision");
+
+  if (!exam) {
+    throw new NotFoundError("Đề thi không tồn tại.");
+  }
+
+  return {
+    revision: exam.contentRevision ?? 0,
+    status: attempt.status,
+    remainingSeconds:
+      attempt.status === "in_progress"
+        ? computeRemainingSeconds(attempt.expiresAt)
+        : 0,
+  };
+}
+
+/**
+ * Return the current candidate exam content for an in-progress attempt.
+ * Used by the live-sync hook when the revision changes.
+ */
+export async function getAttemptExam(
+  attemptId: string,
+  studentId: string
+): Promise<AttemptExamResult> {
+  const attempt = await findOwnedAttempt(attemptId, studentId);
+
+  if (attempt.status !== "in_progress") {
+    throw new BadRequestError(
+      "EXAM_ALREADY_SUBMITTED",
+      "Bài thi đã được nộp trước đó."
+    );
+  }
+
+  const populatedExam = await loadPopulatedExam(attempt.examId);
+  const mediaUrlMap = await presignMediaMap(
+    populatedExam,
+    examMediaPresignTtl(populatedExam.durationMinutes)
+  );
+
+  return {
+    exam: applyQuestionOrder(
+      buildCandidateExam(populatedExam, mediaUrlMap),
+      attempt.questionOrder ?? []
+    ),
+    revision: populatedExam.contentRevision ?? 0,
+    remainingSeconds: computeRemainingSeconds(attempt.expiresAt),
+    updatedAt: populatedExam.updatedAt,
   };
 }
 
@@ -1208,38 +1381,62 @@ export async function getAttemptResult(
     (attempt.examId as unknown as { _id?: Types.ObjectId })._id ?? attempt.examId;
   const populatedExam = await loadPopulatedExam(examIdRef);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
-  const resultSections = normalizeExamSectionNumbering(
-    examObj.sections ?? []
-  ).sections;
-  const details: ResultQuestionDetail[] = [];
-  // FIX-22: index answers once instead of scanning per question.
-  const answerByQuestionId = new Map(
-    attempt.answers.map((answer) => [answer.questionId.toString(), answer.value])
-  );
+  let details: ResultQuestionDetail[];
 
-  for (const section of resultSections) {
-    for (const group of section.questionGroups ?? []) {
-      for (const q of group.questions ?? []) {
-        const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
-        const acceptedAnswers = q.acceptedAnswers ?? [];
+  if (attempt.resultDetails && attempt.resultDetails.length > 0) {
+    // Preferred path: immutable snapshot taken at submit time.
+    details = attempt.resultDetails.map((detail) => ({
+      questionId: detail.questionId.toString(),
+      questionNumber: detail.questionNumber,
+      groupType: detail.groupType,
+      skill: detail.skill,
+      studentAnswer: detail.studentAnswer ?? null,
+      acceptedAnswers: detail.acceptedAnswers ?? [],
+      isCorrect: detail.isCorrect,
+      explanation: detail.explanation ?? null,
+      points: detail.points,
+      prompt: detail.prompt,
+    }));
+  } else {
+    // Legacy attempts submitted before snapshots existed: derive from the
+    // live exam. Results are only stable once the backfill script has run.
+    const resultSections = normalizeExamSectionNumbering(
+      examObj.sections ?? []
+    ).sections;
+    details = [];
+    // FIX-22: index answers once instead of scanning per question.
+    const answerByQuestionId = new Map(
+      attempt.answers.map((answer) => [answer.questionId.toString(), answer.value])
+    );
 
-        let isCorrect = false;
-        if (studentAnswer !== null) {
-          const withinWordLimit =
-            !shouldEnforceWordLimit(group.groupType) ||
-            checkWordLimit(studentAnswer, group.config ?? {});
-          isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+    for (const section of resultSections) {
+      for (const group of section.questionGroups ?? []) {
+        for (const q of group.questions ?? []) {
+          const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
+          const acceptedAnswers = q.acceptedAnswers ?? [];
+          const isWriting = section.skill === "writing";
+
+          let isCorrect = false;
+          if (!isWriting && studentAnswer !== null) {
+            const withinWordLimit =
+              !shouldEnforceWordLimit(group.groupType) ||
+              checkWordLimit(studentAnswer, group.config ?? {});
+            isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+          }
+
+          details.push({
+            questionId: q._id.toString(),
+            questionNumber: q.questionNumber,
+            groupType: group.groupType,
+            skill: section.skill,
+            studentAnswer,
+            acceptedAnswers,
+            isCorrect,
+            explanation: q.explanation ?? null,
+            points: q.points ?? 1,
+            prompt: q.prompt ?? "",
+          });
         }
-
-        details.push({
-          questionId: q._id.toString(),
-          questionNumber: q.questionNumber,
-          groupType: group.groupType,
-          studentAnswer,
-          acceptedAnswers,
-          isCorrect,
-          explanation: q.explanation ?? null,
-        });
       }
     }
   }
@@ -1305,6 +1502,15 @@ export async function getAttemptResult(
     }
   }
 
+  // Writing questions are excluded so a writing-only practice shows 0/0
+  // instead of "0 out of N" (they are graded by a teacher, not by key).
+  const objectiveDetails = details.filter(
+    (detail) => detail.skill !== "writing"
+  );
+  const objectiveTotal = objectiveDetails.reduce(
+    (acc, detail) => acc + (detail.points ?? 1),
+    0
+  );
   let rawScore: number | undefined;
   let percentage: number | undefined;
 
@@ -1313,7 +1519,7 @@ export async function getAttemptResult(
     const reading = attempt.scores?.readingRaw ?? 0;
     rawScore = listening + reading;
     percentage =
-      totalPoints > 0 ? Math.round((rawScore / totalPoints) * 100) : 0;
+      objectiveTotal > 0 ? Math.round((rawScore / objectiveTotal) * 100) : 0;
   }
 
   if (!showScore) {

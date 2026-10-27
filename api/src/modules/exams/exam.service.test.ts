@@ -182,22 +182,53 @@ describe("publish and unpublish", () => {
     expect(result.status).toBe("published");
   });
 
-  it("throws BadRequestError (PRACTICE_INVALID_SKILL) when practice has writing skill", async () => {
+  it("publishes a writing practice without an answer key", async () => {
     const mockExam = {
       _id: examId,
       createdBy: teacherId,
       kind: "practice",
       sections: [
-        { skill: "writing", questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["a"] }] }] },
+        {
+          skill: "writing",
+          part: 2,
+          title: "Writing Task 2",
+          questionGroups: [
+            {
+              groupType: "writing_task_2",
+              config: {},
+              questions: [{ questionNumber: 1, prompt: "Essay", acceptedAnswers: [], points: 1 }],
+            },
+          ],
+        },
       ],
       status: "draft",
-      save: vi.fn(),
+      save: vi.fn().mockResolvedValue(true),
     };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
 
-    await expect(publish(examId.toString(), teacherId.toString(), "teacher")).rejects.toThrow(
-      "Bài luyện tập chỉ hỗ trợ kỹ năng Listening hoặc Reading."
-    );
+    const result = await publish(examId.toString(), teacherId.toString(), "teacher");
+
+    expect(result.status).toBe("published");
+    expect(mockExam.scoringMode).toBe("raw");
+  });
+
+  it("publishes a mixed practice containing Listening, Reading and Writing", async () => {
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "practice",
+      sections: [
+        { skill: "listening", part: 1, questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["a"] }] }] },
+        { skill: "reading", part: 1, questionGroups: [{ questions: [{ questionNumber: 1, acceptedAnswers: ["b"] }] }] },
+        { skill: "writing", part: 1, questionGroups: [{ groupType: "writing_task_1", questions: [{ questionNumber: 1, acceptedAnswers: [] }] }] },
+      ],
+      status: "draft",
+      save: vi.fn().mockResolvedValue(true),
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    const result = await publish(examId.toString(), teacherId.toString(), "teacher");
+    expect(result.status).toBe("published");
   });
 
   it("forces practice scoringMode to raw on publish (legacy band data)", async () => {
@@ -373,7 +404,9 @@ describe("exam list deletion flags", () => {
         }) as never
     );
     vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(2 as never);
-    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce([examA] as never);
+    vi.spyOn(AttemptModel, "aggregate").mockResolvedValueOnce([
+      { _id: examA, total: 1, active: 0 },
+    ] as never);
     vi.spyOn(AssignmentModel, "distinct").mockResolvedValueOnce([examB] as never);
 
     const result = await list(teacherId, "teacher", { page: 1, limit: 10 });
@@ -382,11 +415,15 @@ describe("exam list deletion flags", () => {
       id: examA.toString(),
       hasAttempts: true,
       hasAssignments: false,
+      attemptsCount: 1,
+      activeAttemptsCount: 0,
     });
     expect(result.exams[1]).toMatchObject({
       id: examB.toString(),
       hasAttempts: false,
       hasAssignments: true,
+      attemptsCount: 0,
+      activeAttemptsCount: 0,
     });
     expect(result.exams[0].skills).toEqual([]);
   });
@@ -418,7 +455,7 @@ describe("exam list deletion flags", () => {
         }) as never
     );
     vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(1 as never);
-    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce([] as never);
+    vi.spyOn(AttemptModel, "aggregate").mockResolvedValueOnce([] as never);
     vi.spyOn(AssignmentModel, "distinct").mockResolvedValueOnce([] as never);
 
     const result = await list(teacherId, "teacher", { page: 1, limit: 10 });
@@ -996,3 +1033,251 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
     expect(mockExam.closeAt).toBe(future);
   });
 });
+
+describe("editing live exams", () => {
+  const teacherId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+
+  function storedSections() {
+    return [
+      {
+        _id: new mongoose.Types.ObjectId(),
+        skill: "listening",
+        part: 1,
+        title: "Part 1",
+        mediaIds: [],
+        questionGroups: [
+          {
+            _id: new mongoose.Types.ObjectId(),
+            groupType: "short_answer",
+            instructions: "",
+            config: {},
+            questions: [
+              {
+                _id: new mongoose.Types.ObjectId(),
+                questionNumber: 1,
+                prompt: "Q1",
+                acceptedAnswers: ["answer"],
+                points: 40,
+                explanation: null,
+                mediaIds: [],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+  }
+
+  function inputSections(prompt = "Q1") {
+    return [
+      {
+        skill: "listening" as const,
+        part: 1,
+        title: "Part 1",
+        mediaIds: [],
+        questionGroups: [
+          {
+            groupType: "short_answer" as const,
+            instructions: "",
+            config: {},
+            questions: [
+              {
+                questionNumber: 1,
+                prompt,
+                acceptedAnswers: ["answer"],
+                points: 40,
+                mediaIds: [],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+  }
+
+  function buildLiveExam(overrides: Record<string, unknown> = {}) {
+    return {
+      _id: examId,
+      createdBy: teacherId,
+      kind: "mock",
+      status: "published",
+      title: "Old title",
+      durationMinutes: 60,
+      sections: storedSections(),
+      contentRevision: 5,
+      save: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  it("updates metadata on a published exam without bumping the revision", async () => {
+    const mockExam = buildLiveExam();
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await update(
+      examId.toString(),
+      { title: "New title" },
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(mockExam.title).toBe("New title");
+    expect(mockExam.status).toBe("published");
+    expect(mockExam.contentRevision).toBe(5);
+    expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("updates published content, keeps the status and bumps the revision", async () => {
+    const mockExam = buildLiveExam();
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await update(
+      examId.toString(),
+      { sections: inputSections("Q1 updated") },
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(mockExam.status).toBe("published");
+    expect(mockExam.contentRevision).toBe(6);
+    expect(mockExam.sections[0].questionGroups[0].questions[0].prompt).toBe(
+      "Q1 updated"
+    );
+    expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("updates a closed exam and keeps it closed", async () => {
+    const mockExam = buildLiveExam({ status: "closed" });
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await update(
+      examId.toString(),
+      { sections: inputSections("Q1 closed edit") },
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(mockExam.status).toBe("closed");
+    expect(mockExam.contentRevision).toBe(6);
+    expect(mockExam.save).toHaveBeenCalled();
+  });
+
+  it("does not bump the revision when only config key order changes", async () => {
+    const stored = storedSections();
+    stored[0].questionGroups[0].config = {
+      maxWords: 2,
+      options: ["a", "b"],
+    } as never;
+    const mockExam = buildLiveExam({ sections: stored });
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await update(
+      examId.toString(),
+      {
+        sections: [
+          {
+            _id: stored[0]._id.toString(),
+            skill: "listening",
+            part: 1,
+            title: "Part 1",
+            mediaIds: [],
+            questionGroups: [
+              {
+                _id: stored[0].questionGroups[0]._id.toString(),
+                groupType: "short_answer",
+                instructions: "",
+                config: { options: ["a", "b"], maxWords: 2 },
+                questions: [
+                  {
+                    _id: stored[0].questionGroups[0].questions[0]._id.toString(),
+                    questionNumber: 1,
+                    prompt: "Q1",
+                    acceptedAnswers: ["answer"],
+                    points: 40,
+                    mediaIds: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(mockExam.contentRevision).toBe(5);
+  });
+
+  it("starts the revision at 1 when the exam has no revision yet", async () => {
+    const mockExam = buildLiveExam({ contentRevision: undefined });
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await update(
+      examId.toString(),
+      { sections: inputSections("Q1 first edit") },
+      teacherId.toString(),
+      "teacher"
+    );
+
+    expect(mockExam.contentRevision).toBe(1);
+  });
+
+  it("rejects invalid content on a live exam without saving", async () => {
+    const mockExam = buildLiveExam();
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+
+    await expect(
+      update(
+        examId.toString(),
+        {
+          sections: [
+            {
+              skill: "listening",
+              part: 1,
+              title: "Part 1",
+              mediaIds: [],
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  instructions: "",
+                  config: {},
+                  questions: [],
+                },
+              ],
+            },
+            {
+              skill: "listening",
+              part: 2,
+              title: "Part 2",
+              mediaIds: [],
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  instructions: "",
+                  config: {},
+                  questions: [
+                    {
+                      questionNumber: 2,
+                      prompt: "Q2",
+                      acceptedAnswers: ["answer"],
+                      points: 1,
+                      mediaIds: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        teacherId.toString(),
+        "teacher"
+      )
+    ).rejects.toThrow("Nhóm câu hỏi trong phần Part 1 không được để trống.");
+
+    expect(mockExam.contentRevision).toBe(5);
+    expect(mockExam.save).not.toHaveBeenCalled();
+  });
+});
+

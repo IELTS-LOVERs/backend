@@ -32,6 +32,20 @@ export async function getAttempt(req: Request, res: Response): Promise<void> {
   sendSuccess(res, result);
 }
 
+export async function getRevision(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const result = await attemptService.getAttemptRevision(id, user.id);
+  sendSuccess(res, result);
+}
+
+export async function getExamContent(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const result = await attemptService.getAttemptExam(id, user.id);
+  sendSuccess(res, result);
+}
+
 export async function autosave(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;

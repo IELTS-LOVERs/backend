@@ -116,6 +116,56 @@ describe("Practice Catalog", () => {
 
     expect(result.items[1].progress.status).toBe("in_progress");
   });
+
+  it("returns a writing practice with completed progress and no raw score", async () => {
+    const writingExamId = new mongoose.Types.ObjectId();
+
+    vi.spyOn(ExamModel, "find").mockReturnValueOnce({
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: writingExamId,
+          title: "Writing Task 2 - Environment",
+          durationMinutes: 40,
+          kind: "practice",
+          sections: [
+            {
+              skill: "writing",
+              part: 2,
+              title: "Writing Task 2",
+              questionGroups: [
+                { groupType: "writing_task_2", questions: [{ points: 1 }] },
+              ],
+            },
+          ],
+        },
+      ]),
+    } as never);
+
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([
+        {
+          _id: new mongoose.Types.ObjectId(),
+          examId: writingExamId,
+          status: "submitted",
+          submittedAt: new Date("2026-10-20T10:00:00Z"),
+          scores: {},
+          questionCount: 0,
+          totalPoints: 0,
+        },
+      ]),
+    } as never);
+
+    const result = await getPracticeCatalog(studentId, { skill: "writing" });
+
+    expect(ExamModel.find).toHaveBeenLastCalledWith(
+      expect.objectContaining({ "sections.skill": "writing", status: "published" })
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].skills).toEqual(["writing"]);
+    expect(result.items[0].progress.status).toBe("completed");
+    expect(result.items[0].progress.rawScore).toBe(0);
+    expect(result.items[0].progress.percentage).toBe(0);
+  });
 });
 
 describe("Practice Heatmap", () => {
@@ -223,6 +273,41 @@ describe("Practice Heatmap", () => {
     expect(day21?.reading).toBe(1);
 
     expect(day22?.status).toBe("none");
+  });
+
+  it("counts writing practice attempts separately from listening/reading", async () => {
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue([
+        {
+          _id: new mongoose.Types.ObjectId(),
+          studentId: new mongoose.Types.ObjectId(studentId),
+          examKind: "practice",
+          skills: ["writing"],
+          status: "submitted",
+          submittedAt: new Date("2026-10-22T03:00:00Z"), // 10:00 VN
+          examId: { kind: "practice", sections: [{ skill: "writing" }] },
+        },
+        {
+          _id: new mongoose.Types.ObjectId(),
+          studentId: new mongoose.Types.ObjectId(studentId),
+          examKind: "practice",
+          skills: ["reading", "writing"],
+          status: "submitted",
+          submittedAt: new Date("2026-10-22T04:00:00Z"),
+          examId: { kind: "practice", sections: [{ skill: "reading" }, { skill: "writing" }] },
+        },
+      ]),
+    } as never);
+
+    const result = await getPracticeHeatmap(
+      { id: studentId, role: "student" },
+      { from: "2026-10-22", to: "2026-10-22" }
+    );
+
+    expect(result.days[0].writing).toBe(2);
+    expect(result.days[0].reading).toBe(1);
+    // The heatmap status stays keyed on listening/reading.
+    expect(result.days[0].status).toBe("reading_only");
   });
 });
 

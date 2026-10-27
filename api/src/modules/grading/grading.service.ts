@@ -208,6 +208,7 @@ export async function getAttemptForGrading(
 ): Promise<AttemptGradingView> {
   const attempt = await AttemptModel.findById(attemptId)
     .populate([
+      { path: "examId", select: "title createdBy sections" },
       { path: "assignmentId", select: "teacherId" },
       { path: "studentId", select: "fullName" },
     ]);
@@ -226,31 +227,54 @@ export async function getAttemptForGrading(
   const student = attempt.studentId as unknown as PopulatedStudentSummary | null;
   const tasksByNumber = new Map<1 | 2, GradingWritingTask>();
 
-  for (const section of exam?.sections ?? []) {
-    // New path: question groups
-    const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
-    if (hasGroups) {
-      for (const group of section.questionGroups!) {
-        const task: 1 | 2 | null =
-          group.groupType === "writing_task_1" ? 1 : group.groupType === "writing_task_2" ? 2 : null;
-        if (task === null || tasksByNumber.has(task)) continue;
+  // Preferred path: the snapshot frozen at submit time keeps the prompt and the
+  // student's text stable even if the teacher edits the exam afterwards.
+  for (const detail of attempt.resultDetails ?? []) {
+    const task: 1 | 2 | null =
+      detail.groupType === "writing_task_1"
+        ? 1
+        : detail.groupType === "writing_task_2"
+          ? 2
+          : null;
+    if (task === null || tasksByNumber.has(task)) continue;
 
-        const firstQ = group.questions?.[0];
-        if (!firstQ) continue;
+    const studentContent = detail.studentAnswer ?? "";
+    tasksByNumber.set(task, {
+      task,
+      prompt: detail.prompt ?? "",
+      studentContent,
+      wordCount: countWords(studentContent),
+    });
+  }
 
-        const answer = attempt.answers.find(
-          (candidate) => candidate.questionId.toString() === firstQ._id.toString()
-        );
-        const studentContent = answer?.value ?? "";
+  // Legacy attempts (no snapshot yet): fall back to the live exam.
+  if (tasksByNumber.size === 0) {
+    for (const section of exam?.sections ?? []) {
+      // New path: question groups
+      const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
+      if (hasGroups) {
+        for (const group of section.questionGroups!) {
+          const task: 1 | 2 | null =
+            group.groupType === "writing_task_1" ? 1 : group.groupType === "writing_task_2" ? 2 : null;
+          if (task === null || tasksByNumber.has(task)) continue;
 
-        tasksByNumber.set(task, {
-          task,
-          prompt: firstQ.prompt ?? "",
-          studentContent,
-          wordCount: countWords(studentContent),
-        });
+          const firstQ = group.questions?.[0];
+          if (!firstQ) continue;
+
+          const answer = attempt.answers.find(
+            (candidate) => candidate.questionId.toString() === firstQ._id.toString()
+          );
+          const studentContent = answer?.value ?? "";
+
+          tasksByNumber.set(task, {
+            task,
+            prompt: firstQ.prompt ?? "",
+            studentContent,
+            wordCount: countWords(studentContent),
+          });
+        }
+        continue;
       }
-      continue;
     }
   }
 

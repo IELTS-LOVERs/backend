@@ -3,7 +3,7 @@ import { z } from "zod";
 export const CatalogQuerySchema = z.object({
   query: z.object({
     collectionName: z.string().max(120).optional(),
-    skill: z.enum(["listening", "reading"]).optional(),
+    skill: z.enum(["listening", "reading", "writing"]).optional(),
     part: z.coerce.number().int().min(1).max(4).optional(),
     search: z.string().max(200).optional(),
   }),

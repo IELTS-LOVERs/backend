@@ -11,6 +11,28 @@ export interface IAttemptAnswer {
   savedAt: Date;
 }
 
+/**
+ * Snapshot of one graded question at submit time.
+ *
+ * The exam content can be edited after an attempt is submitted, so results
+ * must never be derived from the live exam. `resultDetails` freezes the
+ * question prompt, the accepted answers and the student's answer so both the
+ * result page and manual Writing grading stay stable.
+ */
+export interface IAttemptResultDetail {
+  questionId: Types.ObjectId;
+  questionNumber?: number;
+  groupType?: string;
+  skill?: "listening" | "reading" | "writing";
+  studentAnswer: string | null;
+  acceptedAnswers: string[];
+  isCorrect: boolean;
+  explanation: string | null;
+  prompt?: string;
+  /** Maximum points of the question at snapshot time. */
+  points?: number;
+}
+
 export interface IAttemptScores {
   listeningRaw?: number;
   listeningBand?: number;
@@ -45,6 +67,8 @@ export interface IAttempt extends mongoose.Document {
   correctCount?: number;
   wrongCount?: number;
   blankCount?: number;
+  /** Immutable result snapshot written when the attempt is finalized. */
+  resultDetails?: IAttemptResultDetail[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -54,6 +78,22 @@ const AttemptAnswerSchema = new Schema<IAttemptAnswer>(
     questionId: { type: Schema.Types.ObjectId, ref: "Question", required: true },
     value: { type: String, default: "" },
     savedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const AttemptResultDetailSchema = new Schema<IAttemptResultDetail>(
+  {
+    questionId: { type: Schema.Types.ObjectId, required: true },
+    questionNumber: { type: Number },
+    groupType: { type: String },
+    skill: { type: String, enum: ["listening", "reading", "writing"] },
+    studentAnswer: { type: String, default: null },
+    acceptedAnswers: { type: [String], default: [] },
+    isCorrect: { type: Boolean, default: false },
+    explanation: { type: String, default: null },
+    prompt: { type: String },
+    points: { type: Number },
   },
   { _id: false }
 );
@@ -100,6 +140,7 @@ const AttemptSchema = new Schema<IAttempt>(
     correctCount: { type: Number },
     wrongCount: { type: Number },
     blankCount: { type: Number },
+    resultDetails: { type: [AttemptResultDetailSchema], default: undefined },
   },
   { timestamps: true, versionKey: false }
 );

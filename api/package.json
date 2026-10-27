@@ -17,7 +17,8 @@
     "auto-finalize": "tsx src/scripts/auto-finalize.ts",
     "cleanup-media": "tsx src/scripts/cleanup-media.ts",
     "fix-attempt-indexes": "tsx src/scripts/fix-attempt-indexes.ts",
-    "backfill-practice": "tsx src/scripts/backfill-practice.ts"
+    "backfill-practice": "tsx src/scripts/backfill-practice.ts",
+    "backfill:attempt-snapshots": "tsx src/scripts/backfill-attempt-snapshots.ts"
   },
   "engines": {
     "node": ">=20"

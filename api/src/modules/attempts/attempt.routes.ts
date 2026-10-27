@@ -26,6 +26,8 @@ router.get(
   attemptController.getMyAttempts
 );
 router.get("/:id", authenticate, attemptController.getAttempt);
+router.get("/:id/revision", authenticate, attemptController.getRevision);
+router.get("/:id/exam", authenticate, attemptController.getExamContent);
 router.patch(
   "/:id/answers",
   authenticate,

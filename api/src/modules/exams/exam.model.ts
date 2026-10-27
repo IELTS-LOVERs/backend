@@ -114,6 +114,12 @@ export interface IExam extends mongoose.Document {
   durationMinutes: number;
   sections: IExamSection[];
   status: ExamStatus;
+  /**
+   * Monotonic content version. Bumped only when the section tree (questions,
+   * answers, passages, media, order) actually changes, so candidates currently
+   * taking the exam know when to fetch new content.
+   */
+  contentRevision: number;
   openAt?: Date;
   closeAt?: Date;
   createdBy: Types.ObjectId;
@@ -234,6 +240,7 @@ const ExamSchema = new Schema<IExam>(
     durationMinutes: { type: Number, required: true, default: 60 },
     sections: [ExamSectionSchema],
     status: { type: String, enum: ["draft", "published", "closed"], default: "draft" },
+    contentRevision: { type: Number, default: 0 },
     openAt: { type: Date },
     closeAt: { type: Date },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },

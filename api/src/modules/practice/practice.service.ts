@@ -48,6 +48,13 @@ export function addDays(dateStr: string, days: number): string {
 
 export type DailyPracticeStatus = "both" | "listening_only" | "reading_only" | "none";
 
+/** Practice counters per skill. Writing is tracked separately (teacher-graded). */
+export interface SkillPracticeCounts {
+  listening: number;
+  reading: number;
+  writing: number;
+}
+
 export interface CatalogItemProgress {
   status: "not_started" | "in_progress" | "completed";
   attemptId?: string;
@@ -94,6 +101,8 @@ export interface HeatmapDay {
   status: DailyPracticeStatus;
   listening: number;
   reading: number;
+  /** Writing practice attempts on that day (teacher-graded). */
+  writing: number;
 }
 
 export interface HeatmapResponse {
@@ -114,6 +123,8 @@ export interface WeeklyReportDayCell {
   status: DailyPracticeStatus;
   listening: number;
   reading: number;
+  /** Writing practice attempts on that day (teacher-graded). */
+  writing: number;
   practiceCount: number;
   mockCount: number;
 }
@@ -377,7 +388,7 @@ export async function getPracticeHeatmap(
   );
 
   // Group practice attempts by VN date
-  const dayStatsMap = new Map<string, { listening: number; reading: number }>();
+  const dayStatsMap = new Map<string, SkillPracticeCounts>();
 
   for (const attempt of attempts) {
     const exam = attempt.examId;
@@ -391,7 +402,7 @@ export async function getPracticeHeatmap(
 
     let stats = dayStatsMap.get(dateKey);
     if (!stats) {
-      stats = { listening: 0, reading: 0 };
+      stats = { listening: 0, reading: 0, writing: 0 };
       dayStatsMap.set(dateKey, stats);
     }
 
@@ -401,6 +412,8 @@ export async function getPracticeHeatmap(
 
     if (skills.includes("listening")) stats.listening += 1;
     if (skills.includes("reading")) stats.reading += 1;
+    // Writing has no auto score, but the practice activity still counts.
+    if (skills.includes("writing")) stats.writing += 1;
   }
 
   // Build full days list
@@ -408,7 +421,7 @@ export async function getPracticeHeatmap(
   let cursor = from;
 
   while (cursor <= to) {
-    const stats = dayStatsMap.get(cursor) ?? { listening: 0, reading: 0 };
+    const stats = dayStatsMap.get(cursor) ?? { listening: 0, reading: 0, writing: 0 };
     let status: DailyPracticeStatus = "none";
     if (stats.listening > 0 && stats.reading > 0) {
       status = "both";
@@ -423,6 +436,7 @@ export async function getPracticeHeatmap(
       status,
       listening: stats.listening,
       reading: stats.reading,
+      writing: stats.writing,
     });
 
     cursor = addDays(cursor, 1);
@@ -622,6 +636,7 @@ export async function getClassWeeklyReport(
 
       let listening = 0;
       let reading = 0;
+      let writing = 0;
 
       for (const p of dayPractice) {
         const skills = p.skills && p.skills.length > 0
@@ -629,6 +644,7 @@ export async function getClassWeeklyReport(
           : (p.examId?.sections ?? []).map((s) => s.skill);
         if (skills.includes("listening")) listening += 1;
         if (skills.includes("reading")) reading += 1;
+        if (skills.includes("writing")) writing += 1;
       }
 
       let status: DailyPracticeStatus = "none";
@@ -641,6 +657,7 @@ export async function getClassWeeklyReport(
         status,
         listening,
         reading,
+        writing,
         practiceCount: dayPractice.length,
         mockCount: dayMock.length,
       };
@@ -708,9 +725,12 @@ export function exportWeeklyReportCsv(report: WeeklyReportResponse): string {
 
   for (const s of report.students) {
     const dayCells = s.days.map((d) => {
-      if (d.listening > 0 && d.reading > 0) return `L${d.listening}/R${d.reading}`;
-      if (d.listening > 0) return `L${d.listening}`;
-      if (d.reading > 0) return `R${d.reading}`;
+      const objectiveParts = [
+        d.listening > 0 ? `L${d.listening}` : null,
+        d.reading > 0 ? `R${d.reading}` : null,
+      ].filter(Boolean);
+      if (objectiveParts.length > 0) return objectiveParts.join("/");
+      if (d.writing > 0) return `W${d.writing}`;
       return "";
     });
 

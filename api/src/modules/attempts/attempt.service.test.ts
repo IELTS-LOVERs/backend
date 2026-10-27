@@ -9,6 +9,7 @@ import { AttemptModel, type IAttemptAnswer } from "./attempt.model.js";
 import {
   applyQuestionOrder,
   buildCandidateExam,
+  buildResultDetails,
   canAccessAttemptResult,
   collectCandidateQuestionIds,
   collectExamMediaIds,
@@ -18,6 +19,7 @@ import {
   finalizeAttempt,
   getAttemptForRecovery,
   getAttemptResult,
+  getAttemptRevision,
   gradeGroupedQuestions,
   gradeGroupedQuestionsDetailed,
   shuffleQuestionIds,
@@ -1323,5 +1325,269 @@ describe("Practice start, scoring, and resources", () => {
     expect(result.details[0].acceptedAnswers).toEqual([]);
     expect(result.details[0].isCorrect).toBe(false);
     expect(result.details[0].explanation).toBeNull();
+  });
+});
+
+describe("result snapshots", () => {
+  const studentId = new mongoose.Types.ObjectId().toString();
+
+  function makeExamWithQuestion(questionId: mongoose.Types.ObjectId) {
+    return {
+      _id: new mongoose.Types.ObjectId().toString(),
+      sections: [
+        {
+          skill: "listening",
+          questionGroups: [
+            {
+              groupType: "short_answer",
+              config: {},
+              questions: [
+                {
+                  _id: questionId,
+                  questionNumber: 1,
+                  prompt: "City?",
+                  acceptedAnswers: ["london"],
+                  points: 2,
+                  explanation: "capital of the UK",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("buildResultDetails freezes answers, keys and recomputed totals", () => {
+    const questionId = new mongoose.Types.ObjectId();
+    const exam = makeExamWithQuestion(questionId);
+
+    const snapshot = buildResultDetails(exam as never, [
+      { questionId, value: "london" },
+    ]);
+
+    expect(snapshot.questionCount).toBe(1);
+    expect(snapshot.totalPoints).toBe(2);
+    expect(snapshot.details).toHaveLength(1);
+    expect(snapshot.details[0]).toMatchObject({
+      questionNumber: 1,
+      groupType: "short_answer",
+      skill: "listening",
+      studentAnswer: "london",
+      acceptedAnswers: ["london"],
+      isCorrect: true,
+      explanation: "capital of the UK",
+      prompt: "City?",
+    });
+  });
+
+  it("buildResultDetails marks blank answers as incorrect", () => {
+    const questionId = new mongoose.Types.ObjectId();
+    const snapshot = buildResultDetails(
+      makeExamWithQuestion(questionId) as never,
+      []
+    );
+
+    expect(snapshot.details[0].studentAnswer).toBeNull();
+    expect(snapshot.details[0].isCorrect).toBe(false);
+  });
+
+  it("keeps writing out of the correct/total counts in a practice snapshot", () => {
+    const readingId = new mongoose.Types.ObjectId();
+    const writingId = new mongoose.Types.ObjectId();
+    const exam = {
+      _id: new mongoose.Types.ObjectId().toString(),
+      sections: [
+        {
+          skill: "reading",
+          questionGroups: [
+            {
+              groupType: "short_answer",
+              config: {},
+              questions: [
+                { _id: readingId, questionNumber: 1, prompt: "City?", acceptedAnswers: ["london"], points: 1 },
+              ],
+            },
+          ],
+        },
+        {
+          skill: "writing",
+          questionGroups: [
+            {
+              groupType: "writing_task_1",
+              config: {},
+              questions: [
+                { _id: writingId, questionNumber: 1, prompt: "Report", acceptedAnswers: [], points: 1 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const snapshot = buildResultDetails(exam as never, [
+      { questionId: readingId, value: "london" },
+      { questionId: writingId, value: "My essay about the chart." },
+    ]);
+
+    // The writing answer is still snapshotted for the teacher, but the score
+    // denominator only covers the auto-gradable questions.
+    expect(snapshot.details).toHaveLength(2);
+    expect(snapshot.questionCount).toBe(1);
+    expect(snapshot.totalPoints).toBe(1);
+    const writing = snapshot.details.find((d) => d.skill === "writing");
+    expect(writing?.studentAnswer).toBe("My essay about the chart.");
+    expect(writing?.points).toBe(1);
+  });
+
+  it("finalizeAttempt writes the snapshot and recalculated totals", async () => {
+    const questionId = new mongoose.Types.ObjectId();
+    const attempt = {
+      _id: new mongoose.Types.ObjectId(),
+      studentId: new mongoose.Types.ObjectId(studentId),
+      examId: new mongoose.Types.ObjectId(),
+      status: "in_progress",
+      answers: [{ questionId, value: "london" }],
+      scores: {},
+    };
+
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: attempt.examId,
+        kind: "practice",
+        scoringMode: "raw",
+        contentRevision: 2,
+        toObject: () => makeExamWithQuestion(questionId),
+      }),
+    } as never);
+
+    let savedSet: Record<string, unknown> = {};
+    vi.spyOn(AttemptModel, "findOneAndUpdate").mockImplementationOnce(
+      (_filter: unknown, update: unknown) => {
+        savedSet = (update as { $set: Record<string, unknown> }).$set;
+        return {
+          _id: attempt._id,
+          status: "submitted",
+          scores: savedSet.scores,
+          resultDetails: savedSet.resultDetails,
+          questionCount: savedSet.questionCount,
+          totalPoints: savedSet.totalPoints,
+        } as never;
+      }
+    );
+
+    await finalizeAttempt(attempt as never, new Date());
+
+    const details = savedSet.resultDetails as Array<Record<string, unknown>>;
+    expect(details).toHaveLength(1);
+    expect(details[0]).toMatchObject({
+      studentAnswer: "london",
+      acceptedAnswers: ["london"],
+      isCorrect: true,
+    });
+    expect(savedSet.questionCount).toBe(1);
+    expect(savedSet.totalPoints).toBe(2);
+  });
+
+  it("getAttemptResult prefers the snapshot over the live exam", async () => {
+    const questionId = new mongoose.Types.ObjectId();
+    const attemptId = new mongoose.Types.ObjectId().toString();
+    const examId = new mongoose.Types.ObjectId();
+
+    const mockAttempt = {
+      _id: attemptId,
+      studentId,
+      examId: { _id: examId, title: "Mock Exam", durationMinutes: 60 },
+      status: "submitted",
+      answers: [{ questionId, value: "london" }],
+      scores: { listeningRaw: 1 },
+      questionCount: 1,
+      totalPoints: 2,
+      resultDetails: [
+        {
+          questionId,
+          questionNumber: 1,
+          groupType: "short_answer",
+          skill: "listening",
+          studentAnswer: "london",
+          acceptedAnswers: ["london"],
+          isCorrect: true,
+          explanation: "frozen explanation",
+          prompt: "City?",
+        },
+      ],
+    };
+
+    vi.spyOn(AttemptModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValueOnce(null);
+
+    // Live exam was edited after submission: the key no longer matches.
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      populate: vi.fn().mockResolvedValue({
+        _id: examId,
+        kind: "practice",
+        scoringMode: "raw",
+        toObject: () => ({
+          _id: examId,
+          sections: [
+            {
+              skill: "listening",
+              questionGroups: [
+                {
+                  groupType: "short_answer",
+                  questions: [
+                    {
+                      _id: questionId,
+                      questionNumber: 1,
+                      acceptedAnswers: ["paris"],
+                      points: 2,
+                      explanation: "new explanation",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    } as never);
+
+    const result = await getAttemptResult(attemptId, {
+      id: studentId,
+      role: "student",
+    });
+
+    expect(result.details).toHaveLength(1);
+    expect(result.details[0]).toMatchObject({
+      studentAnswer: "london",
+      acceptedAnswers: ["london"],
+      isCorrect: true,
+      explanation: "frozen explanation",
+    });
+  });
+
+  it("getAttemptRevision returns the live content revision", async () => {
+    const attemptId = new mongoose.Types.ObjectId().toString();
+    const examId = new mongoose.Types.ObjectId();
+    const expiresAt = new Date(Date.now() + 120_000);
+
+    vi.spyOn(AttemptModel, "findById").mockResolvedValueOnce({
+      _id: attemptId,
+      studentId,
+      examId,
+      status: "in_progress",
+      expiresAt,
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue({ contentRevision: 7 }),
+    } as never);
+
+    const result = await getAttemptRevision(attemptId, studentId);
+
+    expect(result.revision).toBe(7);
+    expect(result.status).toBe("in_progress");
+    expect(result.remainingSeconds).toBeGreaterThan(0);
   });
 });
