@@ -115,7 +115,93 @@ export async function ensureBucket(bucketName: string): Promise<void> {
   } else {
     console.log(`[minio] Bucket "${bucketName}" ready`);
   }
+
+  await ensureBucketPolicy(bucketName);
 }
+
+export function buildPublicReadPolicy(bucketName: string): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "PublicReadGetObject",
+        Effect: "Allow",
+        Principal: { AWS: ["*"] },
+        Action: ["s3:GetObject"],
+        Resource: [`arn:aws:s3:::${bucketName}/*`],
+      },
+    ],
+  });
+}
+
+/**
+ * Make the bucket anonymously readable so media URLs stored in MongoDB
+ * (`PUBLIC_MEDIA_URL/<key>`) keep working forever — a presigned URL expires
+ * after a few minutes and used to be persisted, which is why banners broke.
+ * Idempotent: runs on every boot so pre-existing private buckets get fixed.
+ */
+export async function ensureBucketPolicy(bucketName: string): Promise<void> {
+  if (env.MINIO_BUCKET_POLICY !== "public-read") {
+    logger.info("media.bucket_policy_skipped", { bucket: bucketName });
+    return;
+  }
+
+  try {
+    await minioClient.setBucketPolicy(bucketName, buildPublicReadPolicy(bucketName));
+    console.log(`[minio] Bucket "${bucketName}" policy: public-read`);
+  } catch (error) {
+    // Never block boot: uploads still work, only public GETs may 403.
+    logger.warn("media.bucket_policy_failed", {
+      bucket: bucketName,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Permanent public URL for an object key. This is what gets stored in the DB
+ * (exam banner, avatar…), so it must never carry a signature or an expiry.
+ * Undefined keys serialize to `undefined` so optional fields stay absent.
+ */
+export function publicObjectUrl(key: string | null | undefined): string | undefined {
+  if (!key) return undefined;
+  return `${env.PUBLIC_MEDIA_URL.replace(/\/+$/, "")}/${key.replace(/^\/+/, "")}`;
+}
+
+/**
+ * Turn a stored media URL back into its object key. Understands every shape we
+ * have ever handed to the client:
+ *   - `https://host/ielts-media/uploads/...` (static public URL)
+ *   - `...?X-Amz-...` / `...?X-Amz-Signature=...` (presigned, may be expired)
+ *   - `http://localhost:9010/ielts-media/uploads/...` (dev host)
+ * Other URLs (Unsplash, external CDNs…) return null and must be left untouched.
+ */
+export function mediaKeyFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+
+  const path = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+  const bucketPrefix = `${env.MINIO_BUCKET}/`;
+
+  let key: string;
+  if (path.startsWith(bucketPrefix)) {
+    key = path.slice(bucketPrefix.length);
+  } else if (path.startsWith("uploads/")) {
+    // Path-style URL whose host maps straight to the bucket (or virtual-host).
+    key = path;
+  } else {
+    return null;
+  }
+
+  return key.length > 0 ? key : null;
+}
+
 
 /**
  * Short-lived in-memory cache of presigned GET URLs.

@@ -6,7 +6,7 @@ import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel, type IAttempt } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
-import { countExamQuestions, countExamPoints } from "../exams/exam.service.js";
+import { countExamQuestions, countExamPoints, normalizeBannerUrl } from "../exams/exam.service.js";
 import type { CatalogQuery, HeatmapQuery } from "./practice.validation.js";
 
 export const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
@@ -281,7 +281,7 @@ export async function getPracticeCatalog(
     return {
       examId: exam._id.toString(),
       title: exam.title,
-      bannerUrl: exam.bannerUrl,
+      bannerUrl: normalizeBannerUrl(exam.bannerUrl) ?? undefined,
       durationMinutes: exam.durationMinutes,
       questionCount: totalQCount,
       totalPoints,

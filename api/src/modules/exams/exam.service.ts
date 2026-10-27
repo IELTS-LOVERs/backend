@@ -22,7 +22,10 @@ import {
 } from "../attempts/attempt.service.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
+import { ExamEventModel } from "../anti-cheat/exam-event.model.js";
+import { WritingReviewModel } from "../grading/writing-review.model.js";
 import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
+import { normalizeExamSectionNumbering } from "./exam-numbering.js";
 import {
   ExamModel,
   type ExamStatus,
@@ -38,6 +41,7 @@ import {
   type RichDocValue,
 } from "./exam.model.js";
 import { canStudentAccessExam, getAssignedExamIds } from "./exam.access.js";
+import { mediaKeyFromUrl, publicObjectUrl } from "../../config/minio.js";
 import type {
   BandConversionInput,
   CreateExamBody,
@@ -53,6 +57,43 @@ import type {
 } from "./exam.validation.js";
 
 export { canStudentAccessExam, getAssignedExamIds };
+
+/**
+ * Normalise a stored banner URL to the permanent public object URL.
+ *
+ * Older banners were saved with the media-library value, which was a presigned
+ * URL with a 15-minute TTL — after that the practice cards got 403 (broken
+ * image). Rewriting the key here fixes existing rows at read time without a
+ * migration, while external URLs (Unsplash, …) pass through untouched.
+ */
+export function normalizeBannerUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  const key = mediaKeyFromUrl(trimmed);
+  return key ? publicObjectUrl(key)! : trimmed;
+}
+
+/** Value to persist when a banner is set: never store a signed URL. */
+function toStoredBannerUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return normalizeBannerUrl(url) ?? undefined;
+}
+
+const SKILL_ORDER: SkillType[] = ["listening", "reading", "writing"];
+
+/** Distinct skills of an exam's sections, deduplicated and sorted IELTS-style. */
+export function collectExamSkills(
+  sections: Array<{ skill?: string | null }> | undefined | null
+): SkillType[] {
+  const present = new Set(
+    (sections ?? [])
+      .map((section) => section.skill)
+      .filter((skill): skill is SkillType => SKILL_ORDER.includes(skill as SkillType))
+  );
+  return SKILL_ORDER.filter((skill) => present.has(skill));
+}
 
 export interface ExamSummary {
   id: string;
@@ -78,8 +119,14 @@ export interface ExamListItem {
   bandConversion?: IBandConversion;
   curriculum?: IExamCurriculum;
   sectionsCount: number;
+  /** Distinct skills present in the sections, in IELTS order. */
+  skills: SkillType[];
   createdAt: Date;
   type?: ExamKind;
+  /** True when at least one student has attempted this exam (teacher view). */
+  hasAttempts?: boolean;
+  /** True when the exam is assigned to at least one class (teacher view). */
+  hasAssignments?: boolean;
 }
 
 export interface SerializedQuestionItem {
@@ -244,7 +291,7 @@ function mapQuestionGroupInput(group: QuestionGroupInput): Partial<IQuestionGrou
 }
 
 export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
-  return sections.map((section) => {
+  const mapped = sections.map((section) => {
     const safeId = toSafeObjectId(section._id);
     const mediaIds = (section.mediaIds ?? [])
       .map(toSafeObjectId)
@@ -264,6 +311,10 @@ export function mapSections(sections: ExamSectionInput[]): IExamSection[] {
       questionGroups: (section.questionGroups ?? []).map(mapQuestionGroupInput) as IQuestionGroup[],
     } as IExamSection;
   });
+
+  // Question numbers are display data; always persist the canonical per-skill
+  // sequence so the candidate view, palette and template blanks stay aligned.
+  return normalizeExamSectionNumbering(mapped).sections;
 }
 
 function serializeQuestionItem(item: IQuestionItem): SerializedQuestionItem {
@@ -389,7 +440,7 @@ export async function create(data: CreateExamBody, userId: string): Promise<Exam
   const exam = await ExamModel.create({
     title: data.title,
     description: data.description ?? undefined,
-    bannerUrl: data.bannerUrl ?? undefined,
+    bannerUrl: toStoredBannerUrl(data.bannerUrl),
     kind,
     scoringMode,
     bandConversion,
@@ -452,23 +503,48 @@ export async function list(
     ExamModel.countDocuments(query),
   ]);
 
+  // Teacher/admin views need to know whether each exam can be deleted or edited.
+  // One extra pair of queries per page (never per row), skipped for students.
+  const attemptedIds = new Set<string>();
+  const assignedIds = new Set<string>();
+
+  if (role !== "student" && exams.length > 0) {
+    const examIds = exams.map((exam) => exam._id);
+    const [attempted, assigned] = await Promise.all([
+      AttemptModel.distinct("examId", { examId: { $in: examIds } }),
+      AssignmentModel.distinct("examId", { examId: { $in: examIds } }),
+    ]);
+    attempted.forEach((id) => attemptedIds.add(String(id)));
+    assigned.forEach((id) => assignedIds.add(String(id)));
+  }
+
   return {
-    exams: exams.map((exam) => ({
-      id: exam._id.toString(),
-      title: exam.title,
-      durationMinutes: exam.durationMinutes,
-      status: exam.status,
-      kind: exam.kind ?? "mock",
-      scoringMode:
-        (exam.kind ?? "mock") === "practice"
-          ? "raw"
-          : exam.scoringMode ?? "band",
-      bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
-      curriculum: exam.curriculum,
-      sectionsCount: exam.sections?.length ?? 0,
-      createdAt: exam.createdAt,
-      type: exam.kind ?? "mock",
-    })),
+    exams: exams.map((exam) => {
+      const id = exam._id.toString();
+      return {
+        id,
+        title: exam.title,
+        durationMinutes: exam.durationMinutes,
+        status: exam.status,
+        kind: exam.kind ?? "mock",
+        scoringMode:
+          (exam.kind ?? "mock") === "practice"
+            ? "raw"
+            : exam.scoringMode ?? "band",
+        bandConversion: exam.kind === "practice" ? undefined : exam.bandConversion,
+        curriculum: exam.curriculum,
+        sectionsCount: exam.sections?.length ?? 0,
+        skills: collectExamSkills(exam.sections),
+        createdAt: exam.createdAt,
+        type: exam.kind ?? "mock",
+        ...(role !== "student"
+          ? {
+              hasAttempts: attemptedIds.has(id),
+              hasAssignments: assignedIds.has(id),
+            }
+          : {}),
+      };
+    }),
     page,
     limit,
     total,
@@ -550,12 +626,15 @@ export async function getById(
       ),
     };
   });
+  // Legacy drafts may have duplicated/stale numbers. The editor displays the
+  // canonical sequence and writes it back on the next autosave.
+  const normalizedSections = normalizeExamSectionNumbering(sections).sections;
 
   return {
     id: exam._id.toString(),
     title: exam.title,
     description: exam.description ?? null,
-    bannerUrl: exam.bannerUrl ?? null,
+    bannerUrl: normalizeBannerUrl(exam.bannerUrl),
     durationMinutes: exam.durationMinutes,
     status: exam.status,
     kind: exam.kind ?? "mock",
@@ -576,7 +655,7 @@ export async function getById(
     closeAt: exam.closeAt ?? null,
     hasAttempts: Boolean(hasAttempts),
     hasAssignments: Boolean(hasAssignments),
-    sections,
+    sections: normalizedSections,
     type: exam.kind ?? "mock",
   };
 }
@@ -612,7 +691,7 @@ export async function update(
   }
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
-  if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (data.bannerUrl !== undefined) exam.bannerUrl = toStoredBannerUrl(data.bannerUrl);
   if (data.disableTextSelection !== undefined) {
     exam.disableTextSelection = data.disableTextSelection;
   }
@@ -688,7 +767,7 @@ export async function updateMetadata(
   }
   if (data.title !== undefined) exam.title = data.title;
   if (data.description !== undefined) exam.description = data.description ?? undefined;
-  if (data.bannerUrl !== undefined) exam.bannerUrl = data.bannerUrl ?? undefined;
+  if (data.bannerUrl !== undefined) exam.bannerUrl = toStoredBannerUrl(data.bannerUrl);
   if (data.disableTextSelection !== undefined) {
     exam.disableTextSelection = data.disableTextSelection;
   }
@@ -775,36 +854,99 @@ export async function updateCurriculum(
   return exam.curriculum ?? null;
 }
 
-export async function remove(id: string, userId: string, role: string): Promise<void> {
-  const exam = await findOwnedExam(id, userId, role);
+export interface RemoveExamOptions {
+  /**
+   * Admin-only hard delete. Removes attempts, writing reviews and anti-cheat
+   * events as well. Teachers may never use it.
+   */
+  force?: boolean;
+}
 
-  if (exam.status === "published") {
+export interface RemoveExamResult {
+  id: string;
+  deletedAssignments: number;
+  deletedAttempts: number;
+  forced: boolean;
+}
+
+export async function remove(
+  id: string,
+  userId: string,
+  role: string,
+  options: RemoveExamOptions = {}
+): Promise<RemoveExamResult> {
+  const exam = await findOwnedExam(id, userId, role);
+  const force = options.force === true;
+
+  if (force && role !== "admin") {
+    throw new ForbiddenError(
+      "FORBIDDEN",
+      "Chỉ quản trị viên mới có thể xoá cứng đề thi."
+    );
+  }
+
+  if (!force && exam.status === "published") {
     throw new BadRequestError(
       "EXAM_CANNOT_EDIT_PUBLISHED",
       "Đề đã xuất bản không thể xoá trực tiếp. Hãy dùng “Sửa” để chuyển về nháp trước."
     );
   }
 
-  const [hasAttempt, hasAssignment] = await Promise.all([
-    AttemptModel.exists({ examId: exam._id }),
-    AssignmentModel.exists({ examId: exam._id }),
-  ]);
-
-  if (hasAttempt) {
-    throw new BadRequestError(
-      "EXAM_HAS_ATTEMPTS",
-      "Không thể xoá đề đã có học sinh làm bài."
-    );
+  if (!force) {
+    const hasAttempt = await AttemptModel.exists({ examId: exam._id });
+    if (hasAttempt) {
+      throw new BadRequestError(
+        "EXAM_HAS_ATTEMPTS",
+        "Không thể xoá đề đã có học sinh làm bài."
+      );
+    }
+  } else {
+    const hasActiveAttempt = await AttemptModel.exists({
+      examId: exam._id,
+      status: "in_progress",
+    });
+    if (hasActiveAttempt) {
+      throw new BadRequestError(
+        "EXAM_HAS_ACTIVE_ATTEMPTS",
+        "Đang có học sinh làm bài nên chưa thể xoá đề. Vui lòng đợi bài làm kết thúc."
+      );
+    }
   }
 
-  if (hasAssignment) {
-    throw new BadRequestError(
-      "EXAM_HAS_ASSIGNMENTS",
-      "Không thể xoá đề đã được giao cho lớp."
-    );
+  let deletedAttempts = 0;
+
+  if (force) {
+    // Delete children before the parent: the repo has no transactions, so a
+    // failure halfway leaves the exam in place and the operation can be retried.
+    const attemptIds = await AttemptModel.distinct("_id", { examId: exam._id });
+    if (attemptIds.length > 0) {
+      await WritingReviewModel.deleteMany({ attemptId: { $in: attemptIds } });
+      await ExamEventModel.deleteMany({ attemptId: { $in: attemptIds } });
+    }
+    const attemptResult = await AttemptModel.deleteMany({ examId: exam._id });
+    deletedAttempts = attemptResult.deletedCount ?? 0;
   }
+
+  const assignmentResult = await AssignmentModel.deleteMany({ examId: exam._id });
+  const deletedAssignments = assignmentResult.deletedCount ?? 0;
 
   await ExamModel.deleteOne({ _id: exam._id });
+
+  if (force) {
+    logger.warn("exam.force_deleted", {
+      examId: exam._id.toString(),
+      adminId: userId,
+      deletedAttempts,
+      deletedAssignments,
+    });
+  }
+
+  return {
+    id: exam._id.toString(),
+    deletedAssignments,
+    deletedAttempts,
+    forced: force,
+  };
 }
 
 /**
@@ -906,6 +1048,21 @@ export async function clone(
   const clonedScoringMode: ExamScoringMode =
     clonedKind === "practice" ? "raw" : original.scoringMode ?? "band";
 
+  const clonedSections = normalizeExamSectionNumbering(
+    original.sections.map((section) => ({
+      skill: section.skill,
+      part: section.part,
+      title: section.title,
+      instructions: section.instructions,
+      instructionsDoc: section.instructionsDoc,
+      passageText: section.passageText,
+      passageDoc: section.passageDoc,
+      transcript: section.transcript,
+      mediaIds: section.mediaIds,
+      questionGroups: section.questionGroups,
+    }))
+  ).sections;
+
   const cloned = await ExamModel.create({
     title: `[Bản sao] ${original.title}`,
     description: original.description,
@@ -919,18 +1076,7 @@ export async function clone(
     curriculum: original.curriculum,
     postSubmissionResources: original.postSubmissionResources,
     durationMinutes: original.durationMinutes,
-    sections: original.sections.map((section) => ({
-      skill: section.skill,
-      part: section.part,
-      title: section.title,
-      instructions: section.instructions,
-      instructionsDoc: section.instructionsDoc,
-      passageText: section.passageText,
-      passageDoc: section.passageDoc,
-      transcript: section.transcript,
-      mediaIds: section.mediaIds,
-      questionGroups: section.questionGroups,
-    })),
+    sections: clonedSections,
     status: "draft",
     openAt: original.openAt,
     closeAt: original.closeAt,
@@ -970,6 +1116,10 @@ export async function publish(
   role: string
 ): Promise<{ id: string; status: ExamStatus }> {
   const exam = await findOwnedExam(id, userId, role);
+
+  // Heal legacy drafts on publish: numbering is part of the candidate contract.
+  const normalized = normalizeExamSectionNumbering(exam.sections);
+  if (normalized.changed) exam.sections = normalized.sections;
 
   if (exam.sections.length === 0 || countExamQuestions(exam) === 0) {
     throw new BadRequestError(

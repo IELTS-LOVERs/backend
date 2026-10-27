@@ -3,6 +3,7 @@ import { UnauthorizedError } from "../../common/errors/AppError.js";
 import { sendSuccess } from "../../common/utils/response.util.js";
 import * as examService from "./exam.service.js";
 import type {
+  DeleteExamQuery,
   ListExamsQuery,
   UpdateExamCurriculumBody,
   UpdateExamMetadataBody,
@@ -84,8 +85,13 @@ export async function updateExamCurriculum(req: Request, res: Response): Promise
 export async function deleteExam(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const id = req.params.id as string;
-  await examService.remove(id, user.id, user.role);
-  sendSuccess(res, { message: "Xóa đề thi thành công" });
+  const { force } = req.query as unknown as DeleteExamQuery;
+  const result = await examService.remove(id, user.id, user.role, { force });
+  sendSuccess(res, {
+    message: "Xóa đề thi thành công",
+    deletedAssignments: result.deletedAssignments,
+    deletedAttempts: result.deletedAttempts,
+  });
 }
 
 export async function cloneExam(req: Request, res: Response): Promise<void> {

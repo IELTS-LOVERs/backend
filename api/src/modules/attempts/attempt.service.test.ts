@@ -125,6 +125,45 @@ describe("buildCandidateExam", () => {
     expect(question.points).toBe(2);
   });
 
+  it("heals legacy duplicate/out-of-order numbers and template blanks", () => {
+    const legacyExam = {
+      toObject: () => ({
+        _id: new mongoose.Types.ObjectId(),
+        title: "Legacy numbering",
+        sections: [
+          {
+            skill: "listening",
+            part: 1,
+            title: "Part 1",
+            questionGroups: [
+              makeGroup({
+                questions: [
+                  makeGroupQuestion({ questionNumber: 6 }),
+                  makeGroupQuestion({ questionNumber: 7 }),
+                ],
+              }),
+              makeGroup({
+                config: { template: "Name: [1]\nCity: [2]" },
+                questions: [
+                  makeGroupQuestion({ questionNumber: 2 }),
+                  makeGroupQuestion({ questionNumber: 3 }),
+                ],
+              }),
+            ],
+          },
+        ],
+      }),
+    } as unknown as IExam;
+
+    const candidate = buildCandidateExam(legacyExam);
+    const groups = candidate.sections[0].questionGroups;
+
+    expect(
+      groups.flatMap((group) => group.questions.map((q) => q.questionNumber))
+    ).toEqual([1, 2, 3, 4]);
+    expect(groups[1].config.template).toBe("Name: [3]\nCity: [4]");
+  });
+
   it("populates media URLs for section and question media", () => {
     const sectionMediaDoc = {
       _id: new mongoose.Types.ObjectId(),

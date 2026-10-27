@@ -1,9 +1,11 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
 import { BadRequestError, ForbiddenError } from "../../common/errors/AppError.js";
+import { ExamEventModel } from "../anti-cheat/exam-event.model.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
+import { WritingReviewModel } from "../grading/writing-review.model.js";
 import { ExamModel } from "./exam.model.js";
 import { canStudentAccessExam } from "./exam.access.js";
 import {
@@ -309,12 +311,14 @@ describe("student access to exams", () => {
       } as never;
     });
     vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(0 as never);
+    const distinctSpy = vi.spyOn(AttemptModel, "distinct");
 
     await list(studentId, "student", { page: 1, limit: 10 });
     expect(capturedQuery).toEqual({
       status: "published",
       _id: { $in: [assignedExamId] },
     });
+    expect(distinctSpy).not.toHaveBeenCalled();
   });
 
   it("throws ForbiddenError when student tries to get non-published exam", async () => {
@@ -328,6 +332,99 @@ describe("student access to exams", () => {
     } as never);
 
     await expect(getById("exam-123", studentId, "student")).rejects.toThrow(ForbiddenError);
+  });
+});
+
+describe("exam list deletion flags", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+
+  it("marks attempts and assignments for teacher list rows", async () => {
+    const examA = new mongoose.Types.ObjectId();
+    const examB = new mongoose.Types.ObjectId();
+    const exams = [
+      {
+        _id: examA,
+        title: "Exam A",
+        durationMinutes: 60,
+        status: "draft",
+        kind: "mock",
+        sections: [],
+        createdAt: new Date(),
+      },
+      {
+        _id: examB,
+        title: "Exam B",
+        durationMinutes: 60,
+        status: "closed",
+        kind: "practice",
+        sections: [],
+        createdAt: new Date(),
+      },
+    ];
+
+    vi.spyOn(ExamModel, "find").mockImplementationOnce(
+      () =>
+        ({
+          sort: vi.fn().mockReturnValue({
+            skip: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue(exams),
+            }),
+          }),
+        }) as never
+    );
+    vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(2 as never);
+    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce([examA] as never);
+    vi.spyOn(AssignmentModel, "distinct").mockResolvedValueOnce([examB] as never);
+
+    const result = await list(teacherId, "teacher", { page: 1, limit: 10 });
+
+    expect(result.exams[0]).toMatchObject({
+      id: examA.toString(),
+      hasAttempts: true,
+      hasAssignments: false,
+    });
+    expect(result.exams[1]).toMatchObject({
+      id: examB.toString(),
+      hasAttempts: false,
+      hasAssignments: true,
+    });
+    expect(result.exams[0].skills).toEqual([]);
+  });
+
+  it("reports distinct skills in IELTS order", async () => {
+    const exam = {
+      _id: new mongoose.Types.ObjectId(),
+      title: "Practice combo",
+      durationMinutes: 40,
+      status: "published",
+      kind: "practice",
+      sections: [
+        { skill: "writing", part: 1 },
+        { skill: "reading", part: 1 },
+        { skill: "reading", part: 2 },
+        { skill: "listening", part: 1 },
+      ],
+      createdAt: new Date(),
+    };
+
+    vi.spyOn(ExamModel, "find").mockImplementationOnce(
+      () =>
+        ({
+          sort: vi.fn().mockReturnValue({
+            skip: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([exam]),
+            }),
+          }),
+        }) as never
+    );
+    vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(1 as never);
+    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce([] as never);
+    vi.spyOn(AssignmentModel, "distinct").mockResolvedValueOnce([] as never);
+
+    const result = await list(teacherId, "teacher", { page: 1, limit: 10 });
+
+    expect(result.exams[0].skills).toEqual(["listening", "reading", "writing"]);
+    expect(result.exams[0].sectionsCount).toBe(4);
   });
 });
 
@@ -589,28 +686,42 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
     const mockExam = { _id: examId, createdBy: teacherId, status: "draft" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
     vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
-    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+    const assignmentDelete = vi
+      .spyOn(AssignmentModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 0 } as never);
     const deleteSpy = vi
       .spyOn(ExamModel, "deleteOne")
       .mockResolvedValueOnce({ deletedCount: 1 } as never);
 
-    await remove(examId.toString(), teacherId.toString(), "teacher");
+    const result = await remove(examId.toString(), teacherId.toString(), "teacher");
 
+    expect(assignmentDelete).toHaveBeenCalledWith({ examId });
     expect(deleteSpy).toHaveBeenCalledWith({ _id: examId });
+    expect(result).toEqual({
+      id: examId.toString(),
+      deletedAssignments: 0,
+      deletedAttempts: 0,
+      forced: false,
+    });
   });
 
-  it("deletes a closed exam without attempts or assignments", async () => {
+  it("deletes a closed exam assigned to a class and cascades its assignments", async () => {
     const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
     vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
-    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
+    const assignmentDelete = vi
+      .spyOn(AssignmentModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 2 } as never);
     const deleteSpy = vi
       .spyOn(ExamModel, "deleteOne")
       .mockResolvedValueOnce({ deletedCount: 1 } as never);
 
-    await remove(examId.toString(), teacherId.toString(), "teacher");
+    const result = await remove(examId.toString(), teacherId.toString(), "teacher");
 
+    expect(assignmentDelete).toHaveBeenCalledWith({ examId });
     expect(deleteSpy).toHaveBeenCalledWith({ _id: examId });
+    expect(result.deletedAssignments).toBe(2);
+    expect(result.deletedAttempts).toBe(0);
   });
 
   it("blocks deleting a published exam", async () => {
@@ -626,22 +737,114 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
     const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
     vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
-    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce(null as never);
 
     await expect(
       remove(examId.toString(), teacherId.toString(), "teacher")
     ).rejects.toThrow("Không thể xoá đề đã có học sinh làm bài.");
   });
 
-  it("blocks deleting an exam assigned to a class", async () => {
+  it("blocks a teacher from force deleting", async () => {
     const mockExam = { _id: examId, createdBy: teacherId, status: "closed" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
-    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
-    vi.spyOn(AssignmentModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
 
     await expect(
-      remove(examId.toString(), teacherId.toString(), "teacher")
-    ).rejects.toThrow("Không thể xoá đề đã được giao cho lớp.");
+      remove(examId.toString(), teacherId.toString(), "teacher", { force: true })
+    ).rejects.toThrow("Chỉ quản trị viên mới có thể xoá cứng đề thi.");
+  });
+
+  it("blocks admin force delete while an attempt is in progress", async () => {
+    const adminId = new mongoose.Types.ObjectId();
+    const mockExam = { _id: examId, createdBy: teacherId, status: "published" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
+
+    await expect(
+      remove(examId.toString(), adminId.toString(), "admin", { force: true })
+    ).rejects.toThrow("Đang có học sinh làm bài nên chưa thể xoá đề.");
+  });
+
+  it("force deletes a published exam with attempts as admin", async () => {
+    const adminId = new mongoose.Types.ObjectId();
+    const attemptIds = [
+      new mongoose.Types.ObjectId(),
+      new mongoose.Types.ObjectId(),
+    ];
+    const mockExam = { _id: examId, createdBy: teacherId, status: "published" };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce(attemptIds as never);
+    const reviewDelete = vi
+      .spyOn(WritingReviewModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+    const eventDelete = vi
+      .spyOn(ExamEventModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 5 } as never);
+    const attemptDelete = vi
+      .spyOn(AttemptModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 2 } as never);
+    const assignmentDelete = vi
+      .spyOn(AssignmentModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+    const examDelete = vi
+      .spyOn(ExamModel, "deleteOne")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+
+    const result = await remove(examId.toString(), adminId.toString(), "admin", {
+      force: true,
+    });
+
+    expect(reviewDelete).toHaveBeenCalledWith({
+      attemptId: { $in: attemptIds },
+    });
+    expect(eventDelete).toHaveBeenCalledWith({
+      attemptId: { $in: attemptIds },
+    });
+    expect(attemptDelete).toHaveBeenCalledWith({ examId });
+    expect(assignmentDelete).toHaveBeenCalledWith({ examId });
+    expect(examDelete).toHaveBeenCalledWith({ _id: examId });
+    expect(result).toEqual({
+      id: examId.toString(),
+      deletedAssignments: 1,
+      deletedAttempts: 2,
+      forced: true,
+    });
+  });
+
+  it("force deletes a practice exam with attempts as admin", async () => {
+    const adminId = new mongoose.Types.ObjectId();
+    const attemptIds = [new mongoose.Types.ObjectId()];
+    const mockExam = {
+      _id: examId,
+      createdBy: teacherId,
+      status: "closed",
+      kind: "practice",
+    };
+    vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
+    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce(attemptIds as never);
+    vi.spyOn(WritingReviewModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    vi.spyOn(ExamEventModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    const attemptDelete = vi
+      .spyOn(AttemptModel, "deleteMany")
+      .mockResolvedValueOnce({ deletedCount: 1 } as never);
+    vi.spyOn(AssignmentModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    vi.spyOn(ExamModel, "deleteOne").mockResolvedValueOnce({
+      deletedCount: 1,
+    } as never);
+
+    const result = await remove(examId.toString(), adminId.toString(), "admin", {
+      force: true,
+    });
+
+    expect(attemptDelete).toHaveBeenCalledWith({ examId });
+    expect(result.deletedAttempts).toBe(1);
+    expect(result.forced).toBe(true);
   });
 
   it("reopens a closed exam as published", async () => {

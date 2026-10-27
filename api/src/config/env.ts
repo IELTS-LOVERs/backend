@@ -103,6 +103,12 @@ const EnvSchema = z.object({
   MINIO_SECRET_KEY: z.string().min(1, "MINIO_SECRET_KEY là bắt buộc"),
   MINIO_BUCKET: z.string().min(1).default("ielts-media"),
   PUBLIC_MEDIA_URL: z.string().min(1, "PUBLIC_MEDIA_URL là bắt buộc"),
+  /**
+   * Bucket policy applied on boot: `public-read` (default) lets browsers load
+   * media straight from PUBLIC_MEDIA_URL without a signature; `private` keeps
+   * every GET as a short-lived presigned URL.
+   */
+  MINIO_BUCKET_POLICY: z.enum(["public-read", "private"]).default("public-read"),
 
   /**
    * I-2: host/port that PRESIGNED URLs must embed. The signature covers the

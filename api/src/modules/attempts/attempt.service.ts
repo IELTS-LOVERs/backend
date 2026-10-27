@@ -22,6 +22,7 @@ import {
   type IExamPostSubmissionResources,
   type RichDocValue,
 } from "../exams/exam.model.js";
+import { normalizeExamSectionNumbering } from "../exams/exam-numbering.js";
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
 import "../questions/question.model.js";
@@ -462,6 +463,12 @@ export function buildCandidateExam(
   urlMap?: Map<string, string>
 ): CandidateExam {
   const examObj = exam.toObject() as unknown as RawExamObject;
+  // Legacy exams may have duplicate/out-of-order numbers. Normalize the
+  // candidate copy (and remap template blanks) so the palette, badges and
+  // anchors always agree without mutating the stored exam.
+  const normalizedSections = normalizeExamSectionNumbering(
+    examObj.sections ?? []
+  ).sections;
 
   return {
     id: examObj._id.toString(),
@@ -470,7 +477,7 @@ export function buildCandidateExam(
     scoringMode:
       exam.scoringMode ?? (exam.kind === "practice" ? "raw" : "band"),
     disableTextSelection: exam.disableTextSelection ?? false,
-    sections: (examObj.sections ?? []).map((section) => {
+    sections: normalizedSections.map((section) => {
       const sectionMedia = (section.mediaIds ?? [])
         .map((item) => toCandidateMediaItem(item, urlMap))
         .filter((m): m is CandidateMediaItem => m !== null);
@@ -1201,13 +1208,16 @@ export async function getAttemptResult(
     (attempt.examId as unknown as { _id?: Types.ObjectId })._id ?? attempt.examId;
   const populatedExam = await loadPopulatedExam(examIdRef);
   const examObj = populatedExam.toObject() as unknown as RawExamObject;
+  const resultSections = normalizeExamSectionNumbering(
+    examObj.sections ?? []
+  ).sections;
   const details: ResultQuestionDetail[] = [];
   // FIX-22: index answers once instead of scanning per question.
   const answerByQuestionId = new Map(
     attempt.answers.map((answer) => [answer.questionId.toString(), answer.value])
   );
 
-  for (const section of examObj.sections ?? []) {
+  for (const section of resultSections) {
     for (const group of section.questionGroups ?? []) {
       for (const q of group.questions ?? []) {
         const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;

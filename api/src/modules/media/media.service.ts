@@ -6,7 +6,12 @@ import {
   NotFoundError,
 } from "../../common/errors/AppError.js";
 import { env } from "../../config/env.js";
-import { minioClient, minioPresignClient, presignGetObject } from "../../config/minio.js";
+import {
+  minioClient,
+  minioPresignClient,
+  presignGetObject,
+  publicObjectUrl,
+} from "../../config/minio.js";
 import { logger } from "../../common/utils/logger.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { QuestionModel } from "../questions/question.model.js";
@@ -15,7 +20,7 @@ import type { ListMediaQuery, PresignUploadBody } from "./media.validation.js";
 
 export const PRESIGN_EXPIRES_IN_SECONDS = 15 * 60;
 
-/** TTL for media-library preview URLs (teacher media page, avatars). */
+/** TTL for media-library preview URLs, used only when the bucket is private. */
 const MEDIA_GET_URL_EXPIRES_IN_SECONDS = 15 * 60;
 
 export interface PresignedUploadResult {
@@ -102,7 +107,9 @@ export async function createPresignedUpload(
   return {
     mediaId: media._id.toString(),
     uploadUrl,
-    publicUrl: `${env.PUBLIC_MEDIA_URL}/${key}`,
+    // Permanent public URL: this value gets persisted (exam.bannerUrl, …), so it
+    // must not be a presigned URL that expires minutes after upload.
+    publicUrl: publicObjectUrl(key)!,
     expiresInSeconds: PRESIGN_EXPIRES_IN_SECONDS,
   };
 }
@@ -170,10 +177,13 @@ export async function listMedia(
 
   const serializedItems: MediaListItem[] = await Promise.all(
     items.map(async (item) => {
-      const presigned = await presignGetObject(
-        item.key,
-        MEDIA_GET_URL_EXPIRES_IN_SECONDS
-      );
+      // Private buckets hand out short-lived preview URLs; public buckets use
+      // the permanent URL so the media library doesn't hit 403 after 15 min.
+      const url =
+        env.MINIO_BUCKET_POLICY === "private"
+          ? (await presignGetObject(item.key, MEDIA_GET_URL_EXPIRES_IN_SECONDS)) ??
+            publicObjectUrl(item.key)!
+          : publicObjectUrl(item.key)!;
       return {
         id: item._id.toString(),
         bucket: item.bucket,
@@ -183,7 +193,7 @@ export async function listMedia(
         size: item.size,
         type: item.type,
         status: item.status,
-        url: presigned ?? `${env.PUBLIC_MEDIA_URL}/${item.key}`,
+        url,
         uploadedBy: item.uploadedBy.toString(),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,

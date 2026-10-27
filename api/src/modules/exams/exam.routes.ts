@@ -5,6 +5,7 @@ import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as examController from "./exam.controller.js";
 import {
   CreateExamSchema,
+  DeleteExamSchema,
   ListExamsSchema,
   UpdateExamCurriculumSchema,
   UpdateExamMetadataSchema,
@@ -24,7 +25,7 @@ router.put("/:id", validate(UpdateExamSchema), examController.updateExam);
 router.patch("/:id/metadata", validate(UpdateExamMetadataSchema), examController.updateExamMetadata);
 router.patch("/:id/resources", validate(UpdateExamResourcesSchema), examController.updateExamResources);
 router.patch("/:id/curriculum", validate(UpdateExamCurriculumSchema), examController.updateExamCurriculum);
-router.delete("/:id", examController.deleteExam);
+router.delete("/:id", validate(DeleteExamSchema), examController.deleteExam);
 router.post("/:id/clone", examController.cloneExam);
 router.patch("/:id/publish", examController.publishExam);
 router.patch("/:id/unpublish", examController.unpublishExam);

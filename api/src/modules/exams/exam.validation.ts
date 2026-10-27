@@ -308,6 +308,18 @@ export const UpdateExamCurriculumSchema = z.object({
   body: CurriculumSchema,
 });
 
+export const DeleteExamSchema = z.object({
+  params: z.object({
+    id: z.string().min(1, "Thiếu ID đề thi"),
+  }),
+  query: z.object({
+    force: z
+      .enum(["true", "false"])
+      .optional()
+      .transform((value) => value === "true"),
+  }),
+});
+
 export const ListExamsSchema = z.object({
   query: z.object({
     status: z.enum(["draft", "published", "closed"]).optional(),
@@ -331,3 +343,4 @@ export type UpdateExamMetadataBody = z.infer<typeof UpdateExamMetadataSchema>["b
 export type UpdateExamResourcesBody = z.infer<typeof UpdateExamResourcesSchema>["body"];
 export type UpdateExamCurriculumBody = z.infer<typeof UpdateExamCurriculumSchema>["body"];
 export type ListExamsQuery = z.infer<typeof ListExamsSchema>["query"];
+export type DeleteExamQuery = z.infer<typeof DeleteExamSchema>["query"];
