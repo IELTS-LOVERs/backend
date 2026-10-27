@@ -856,8 +856,9 @@ export async function updateCurriculum(
 
 export interface RemoveExamOptions {
   /**
-   * Admin-only hard delete. Removes attempts, writing reviews and anti-cheat
-   * events as well. Teachers may never use it.
+   * Admin-only hard delete. Removes attempts (including ones still in
+   * progress), writing reviews and anti-cheat events as well. Teachers may
+   * never use it.
    */
   force?: boolean;
 }
@@ -866,6 +867,8 @@ export interface RemoveExamResult {
   id: string;
   deletedAssignments: number;
   deletedAttempts: number;
+  /** Attempts that were still in progress when the exam was force deleted. */
+  deletedActiveAttempts: number;
   forced: boolean;
 }
 
@@ -900,22 +903,20 @@ export async function remove(
         "Không thể xoá đề đã có học sinh làm bài."
       );
     }
-  } else {
-    const hasActiveAttempt = await AttemptModel.exists({
-      examId: exam._id,
-      status: "in_progress",
-    });
-    if (hasActiveAttempt) {
-      throw new BadRequestError(
-        "EXAM_HAS_ACTIVE_ATTEMPTS",
-        "Đang có học sinh làm bài nên chưa thể xoá đề. Vui lòng đợi bài làm kết thúc."
-      );
-    }
   }
 
   let deletedAttempts = 0;
+  let deletedActiveAttempts = 0;
 
   if (force) {
+    // Force delete also stops students who are still working on the exam: the
+    // admin has explicitly confirmed a hard delete, so leaving the exam behind
+    // would keep an orphaned attempt alive forever.
+    deletedActiveAttempts = await AttemptModel.countDocuments({
+      examId: exam._id,
+      status: "in_progress",
+    });
+
     // Delete children before the parent: the repo has no transactions, so a
     // failure halfway leaves the exam in place and the operation can be retried.
     const attemptIds = await AttemptModel.distinct("_id", { examId: exam._id });
@@ -937,6 +938,7 @@ export async function remove(
       examId: exam._id.toString(),
       adminId: userId,
       deletedAttempts,
+      deletedActiveAttempts,
       deletedAssignments,
     });
   }
@@ -945,6 +947,7 @@ export async function remove(
     id: exam._id.toString(),
     deletedAssignments,
     deletedAttempts,
+    deletedActiveAttempts,
     forced: force,
   };
 }

@@ -701,6 +701,7 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
       id: examId.toString(),
       deletedAssignments: 0,
       deletedAttempts: 0,
+      deletedActiveAttempts: 0,
       forced: false,
     });
   });
@@ -752,15 +753,36 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
     ).rejects.toThrow("Chỉ quản trị viên mới có thể xoá cứng đề thi.");
   });
 
-  it("blocks admin force delete while an attempt is in progress", async () => {
+  it("force deletes an exam while an attempt is still in progress as admin", async () => {
     const adminId = new mongoose.Types.ObjectId();
+    const attemptIds = [new mongoose.Types.ObjectId()];
     const mockExam = { _id: examId, createdBy: teacherId, status: "published" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
-    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce({ _id: examId } as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(1 as never);
+    vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce(attemptIds as never);
+    vi.spyOn(WritingReviewModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    vi.spyOn(ExamEventModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    vi.spyOn(AttemptModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 1,
+    } as never);
+    vi.spyOn(AssignmentModel, "deleteMany").mockResolvedValueOnce({
+      deletedCount: 0,
+    } as never);
+    vi.spyOn(ExamModel, "deleteOne").mockResolvedValueOnce({
+      deletedCount: 1,
+    } as never);
 
-    await expect(
-      remove(examId.toString(), adminId.toString(), "admin", { force: true })
-    ).rejects.toThrow("Đang có học sinh làm bài nên chưa thể xoá đề.");
+    const result = await remove(examId.toString(), adminId.toString(), "admin", {
+      force: true,
+    });
+
+    expect(result.deletedAttempts).toBe(1);
+    expect(result.deletedActiveAttempts).toBe(1);
+    expect(result.forced).toBe(true);
   });
 
   it("force deletes a published exam with attempts as admin", async () => {
@@ -771,7 +793,7 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
     ];
     const mockExam = { _id: examId, createdBy: teacherId, status: "published" };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
-    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(0 as never);
     vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce(attemptIds as never);
     const reviewDelete = vi
       .spyOn(WritingReviewModel, "deleteMany")
@@ -806,6 +828,7 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
       id: examId.toString(),
       deletedAssignments: 1,
       deletedAttempts: 2,
+      deletedActiveAttempts: 0,
       forced: true,
     });
   });
@@ -820,7 +843,7 @@ describe("exam lifecycle: delete / reopen / convert to draft", () => {
       kind: "practice",
     };
     vi.spyOn(ExamModel, "findById").mockResolvedValueOnce(mockExam as never);
-    vi.spyOn(AttemptModel, "exists").mockResolvedValueOnce(null as never);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(0 as never);
     vi.spyOn(AttemptModel, "distinct").mockResolvedValueOnce(attemptIds as never);
     vi.spyOn(WritingReviewModel, "deleteMany").mockResolvedValueOnce({
       deletedCount: 0,
