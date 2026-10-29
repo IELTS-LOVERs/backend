@@ -22,6 +22,7 @@ import { antiCheatRoutes } from "./modules/anti-cheat/anti-cheat.routes.js";
 import { dashboardRoutes } from "./modules/dashboard/dashboard.routes.js";
 import { analyticsRoutes } from "./modules/analytics/analytics.routes.js";
 import { practiceRoutes } from "./modules/practice/practice.routes.js";
+import { collectionRoutes } from "./modules/collections/collection.routes.js";
 
 const app = express();
 
@@ -70,6 +71,7 @@ app.use("/api/anti-cheat", antiCheatRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/practice", practiceRoutes);
+app.use("/api/collections", collectionRoutes);
 
 
 app.use((_req, res) => {
