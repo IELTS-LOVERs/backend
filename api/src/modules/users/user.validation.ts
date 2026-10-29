@@ -28,6 +28,25 @@ export const ListUsersSchema = z.object({
   }),
 });
 
+/**
+ * Danh sách học sinh đã đăng ký, dành cho giáo viên (không phải trang quản trị).
+ *
+ * `unassigned=true` lọc ra những bạn chưa thuộc lớp nào — đây là nhóm giáo viên
+ * cần thêm vào lớp.
+ */
+export const ListStudentsSchema = z.object({
+  query: z.object({
+    status: z.enum(["active", "inactive", "suspended"]).optional(),
+    search: z.string().max(100).optional(),
+    unassigned: z
+      .enum(["true", "false"])
+      .optional()
+      .transform((value) => value === "true"),
+    page: z.coerce.number().int().positive().default(1),
+    limit: z.coerce.number().int().positive().max(100).default(20),
+  }),
+});
+
 export const CreateUserSchema = z.object({
   body: z.object({
     email: z.email("Email không hợp lệ"),
@@ -51,5 +70,6 @@ export const UpdateUserStatusSchema = z.object({
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordSchema>["body"];
 export type UpdateProfileBody = z.infer<typeof UpdateProfileSchema>["body"];
 export type ListUsersQuery = z.infer<typeof ListUsersSchema>["query"];
+export type ListStudentsQuery = z.infer<typeof ListStudentsSchema>["query"];
 export type CreateUserBody = z.infer<typeof CreateUserSchema>["body"];
 export type UpdateUserStatusBody = z.infer<typeof UpdateUserStatusSchema>["body"];

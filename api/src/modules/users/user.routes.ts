@@ -7,6 +7,7 @@ import * as userController from "./user.controller.js";
 import {
   AdminResetPasswordSchema,
   CreateUserSchema,
+  ListStudentsSchema,
   ListUsersSchema,
   UpdateProfileSchema,
   UpdateUserStatusSchema,
@@ -27,6 +28,13 @@ router.get(
   authenticate,
   requireRoles("teacher", "admin"),
   dashboardController.getTeacherDashboard
+);
+router.get(
+  "/students",
+  authenticate,
+  requireRoles("teacher", "admin"),
+  validate(ListStudentsSchema),
+  userController.listStudents
 );
 router.get(
   "/",

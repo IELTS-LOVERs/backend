@@ -1086,6 +1086,112 @@ describe("gradeGroupedQuestions counts", () => {
   });
 });
 
+describe("gradeGroupedQuestions multiple-answer groups", () => {
+  const q9 = new mongoose.Types.ObjectId();
+  const q10 = new mongoose.Types.ObjectId();
+  const groupId = new mongoose.Types.ObjectId().toString();
+
+  const questions = [
+    {
+      _id: q9,
+      questionNumber: 9,
+      acceptedAnswers: ["A"],
+      points: 1,
+      groupConfig: {},
+      groupType: "multiple_choice_multiple" as const,
+      groupId,
+    },
+    {
+      _id: q10,
+      questionNumber: 10,
+      acceptedAnswers: ["E"],
+      points: 1,
+      groupConfig: {},
+      groupType: "multiple_choice_multiple" as const,
+      groupId,
+    },
+  ];
+
+  it("awards one point per correct letter, whatever the box order", () => {
+    const result = gradeGroupedQuestionsDetailed(
+      [
+        { questionId: q9, value: "E" },
+        { questionId: q10, value: "A" },
+      ],
+      questions
+    );
+
+    expect(result).toEqual({
+      rawScore: 2,
+      correctCount: 2,
+      wrongCount: 0,
+      blankCount: 0,
+    });
+  });
+
+  it("keeps the point for a half-correct pair", () => {
+    const result = gradeGroupedQuestionsDetailed(
+      [
+        { questionId: q9, value: "A" },
+        { questionId: q10, value: "C" },
+      ],
+      questions
+    );
+
+    expect(result).toEqual({
+      rawScore: 1,
+      correctCount: 1,
+      wrongCount: 1,
+      blankCount: 0,
+    });
+  });
+
+  it("does not award the same letter twice", () => {
+    const result = gradeGroupedQuestionsDetailed(
+      [
+        { questionId: q9, value: "A" },
+        { questionId: q10, value: "A" },
+      ],
+      questions
+    );
+
+    expect(result).toEqual({
+      rawScore: 1,
+      correctCount: 1,
+      wrongCount: 1,
+      blankCount: 0,
+    });
+  });
+
+  it("grades legacy groups that stored both letters in one box", () => {
+    const legacy = [
+      {
+        _id: q9,
+        questionNumber: 9,
+        acceptedAnswers: ["A", "E"],
+        points: 1,
+        groupConfig: {},
+        groupType: "multiple_choice_multiple" as const,
+        groupId,
+      },
+    ];
+
+    expect(
+      gradeGroupedQuestionsDetailed(
+        [{ questionId: q9, value: "E, A" }],
+        legacy
+      )
+    ).toEqual({ rawScore: 1, correctCount: 1, wrongCount: 0, blankCount: 0 });
+
+    expect(
+      gradeGroupedQuestionsDetailed(
+        [{ questionId: q9, value: "A, C" }],
+        legacy
+      )
+    ).toEqual({ rawScore: 0, correctCount: 0, wrongCount: 1, blankCount: 0 });
+  });
+});
+
 describe("Practice start, scoring, and resources", () => {
   const studentId = new mongoose.Types.ObjectId().toString();
   const examId = new mongoose.Types.ObjectId().toString();

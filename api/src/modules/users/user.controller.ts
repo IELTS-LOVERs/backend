@@ -5,6 +5,7 @@ import { toSafeUser } from "./user.serializer.js";
 import * as userService from "./user.service.js";
 import type {
   CreateUserBody,
+  ListStudentsQuery,
   ListUsersQuery,
   UpdateUserStatusBody,
 } from "./user.validation.js";
@@ -50,6 +51,26 @@ export async function listUsers(req: Request, res: Response): Promise<void> {
     total: result.total,
     totalPages: result.totalPages,
   });
+}
+
+export async function listStudents(req: Request, res: Response): Promise<void> {
+  const query = req.query as unknown as ListStudentsQuery;
+  const result = await userService.listRegisteredStudents(query);
+
+  sendSuccess(
+    res,
+    result.students.map(({ user, classes }) => ({
+      ...toSafeUser(user),
+      classes,
+    })),
+    200,
+    {
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      totalPages: result.totalPages,
+    }
+  );
 }
 
 export async function createUser(req: Request, res: Response): Promise<void> {

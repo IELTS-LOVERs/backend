@@ -50,6 +50,7 @@ describe("Practice Catalog", () => {
         _id: exam1Id,
         title: "Cam 18 - T1 - P1",
         durationMinutes: 20,
+        createdAt: new Date("2026-10-01T08:00:00Z"),
         kind: "practice",
         curriculum: { collectionName: "Cam 18", testNumber: 1, part: 1, orderIndex: 1 },
         sections: [
@@ -115,6 +116,7 @@ describe("Practice Catalog", () => {
     expect(result.items[0].progress.percentage).toBe(100);
 
     expect(result.items[1].progress.status).toBe("in_progress");
+    expect(result.items[0].createdAt).toEqual(new Date("2026-10-01T08:00:00Z"));
   });
 
   it("returns a writing practice with completed progress and no raw score", async () => {

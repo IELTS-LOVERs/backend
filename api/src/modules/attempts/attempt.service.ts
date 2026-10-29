@@ -10,6 +10,10 @@ import {
 import { resolveBandScore } from "../../common/utils/band-conversion.js";
 import { calculateOverallBand } from "../../common/utils/ielts-calculator.js";
 import { logger } from "../../common/utils/logger.js";
+import {
+  collectMultiSelectKeys,
+  gradeMultiSelectAnswer,
+} from "../../common/utils/multi-select.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
 import { AssignmentModel, type IAssignment } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
@@ -230,6 +234,8 @@ export interface GradableGroupQuestion {
   points: number;
   groupConfig: Record<string, unknown>;
   groupType: QuestionGroupType;
+  /** Owning group id — needed to grade multi-answer groups as a set. */
+  groupId?: string;
 }
 
 export interface ExamQuestionBuckets {
@@ -575,6 +581,7 @@ export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestion
     else if (section.skill === "writing") hasWriting = true;
 
     for (const group of section.questionGroups ?? []) {
+      const groupId = group._id ? group._id.toString() : undefined;
       for (const q of group.questions ?? []) {
         const gradable: GradableGroupQuestion = {
           _id: q._id,
@@ -583,6 +590,7 @@ export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestion
           points: q.points ?? 1,
           groupConfig: group.config ?? {},
           groupType: group.groupType,
+          groupId,
         };
         if (section.skill === "listening") listeningGrouped.push(gradable);
         else if (section.skill === "reading") readingGrouped.push(gradable);
@@ -633,6 +641,21 @@ export function gradeGroupedQuestionsDetailed(
   const answerByQuestionId = new Map(
     answers.map((answer) => [answer.questionId.toString(), answer.value])
   );
+
+  // "Choose TWO letters" groups share one key spread over several questions,
+  // so collect the questions per group and grade each box against the union.
+  const multiSelectGroups = new Map<string, GradableGroupQuestion[]>();
+  for (const question of questions) {
+    if (question.groupType !== "multiple_choice_multiple" || !question.groupId) {
+      continue;
+    }
+    const list = multiSelectGroups.get(question.groupId) ?? [];
+    list.push(question);
+    multiSelectGroups.set(question.groupId, list);
+  }
+  const multiSelectKeys = new Map<string, Set<string>>();
+  const multiSelectSeen = new Map<string, Set<string>>();
+
   let rawScore = 0;
   let correctCount = 0;
   let wrongCount = 0;
@@ -655,7 +678,24 @@ export function gradeGroupedQuestionsDetailed(
       continue; // Over word limit = 0 marks
     }
 
-    if (matchAnswer(value, question.acceptedAnswers)) {
+    const groupId = question.groupId;
+    const isMultiSelect = Boolean(groupId && multiSelectGroups.has(groupId));
+    let isCorrect: boolean;
+
+    if (isMultiSelect) {
+      let keys = multiSelectKeys.get(groupId!);
+      if (!keys) {
+        keys = collectMultiSelectKeys(multiSelectGroups.get(groupId!));
+        multiSelectKeys.set(groupId!, keys);
+      }
+      const seen = multiSelectSeen.get(groupId!) ?? new Set<string>();
+      multiSelectSeen.set(groupId!, seen);
+      isCorrect = gradeMultiSelectAnswer(value, keys, seen);
+    } else {
+      isCorrect = matchAnswer(value, question.acceptedAnswers);
+    }
+
+    if (isCorrect) {
       rawScore += question.points;
       correctCount += 1;
     } else {
@@ -701,6 +741,12 @@ export function buildResultDetails(
 
   for (const section of sections) {
     for (const group of section.questionGroups ?? []) {
+      const isMultiSelectGroup = group.groupType === "multiple_choice_multiple";
+      const multiSelectKeys = isMultiSelectGroup
+        ? collectMultiSelectKeys(group.questions ?? [])
+        : null;
+      const multiSelectSeen = new Set<string>();
+
       for (const question of group.questions ?? []) {
         const studentAnswer =
           answerByQuestionId.get(question._id.toString()) ?? null;
@@ -716,7 +762,13 @@ export function buildResultDetails(
             !shouldEnforceWordLimit(group.groupType) ||
             checkWordLimit(studentAnswer, group.config ?? {});
           isCorrect =
-            withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+            multiSelectKeys && multiSelectKeys.size > 0
+              ? gradeMultiSelectAnswer(
+                  studentAnswer,
+                  multiSelectKeys,
+                  multiSelectSeen
+                )
+              : withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
         }
 
         if (!isWriting) {
@@ -1411,6 +1463,12 @@ export async function getAttemptResult(
 
     for (const section of resultSections) {
       for (const group of section.questionGroups ?? []) {
+        const isMultiSelectGroup = group.groupType === "multiple_choice_multiple";
+        const multiSelectKeys = isMultiSelectGroup
+          ? collectMultiSelectKeys(group.questions ?? [])
+          : null;
+        const multiSelectSeen = new Set<string>();
+
         for (const q of group.questions ?? []) {
           const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
           const acceptedAnswers = q.acceptedAnswers ?? [];
@@ -1421,7 +1479,15 @@ export async function getAttemptResult(
             const withinWordLimit =
               !shouldEnforceWordLimit(group.groupType) ||
               checkWordLimit(studentAnswer, group.config ?? {});
-            isCorrect = withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
+            isCorrect =
+              multiSelectKeys && multiSelectKeys.size > 0
+                ? gradeMultiSelectAnswer(
+                    studentAnswer,
+                    multiSelectKeys,
+                    multiSelectSeen
+                  )
+                : withinWordLimit &&
+                  matchAnswer(studentAnswer, acceptedAnswers);
           }
 
           details.push({

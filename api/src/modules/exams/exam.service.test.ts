@@ -10,7 +10,9 @@ import { ExamModel } from "./exam.model.js";
 import { canStudentAccessExam } from "./exam.access.js";
 import {
   assertOwnership,
+  buildCollectionFilter,
   clone,
+  compareExamTitles,
   convertToDraft,
   getById,
   list,
@@ -462,6 +464,131 @@ describe("exam list deletion flags", () => {
 
     expect(result.exams[0].skills).toEqual(["listening", "reading", "writing"]);
     expect(result.exams[0].sectionsCount).toBe(4);
+  });
+});
+
+describe("exam list filters and sorting", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+
+  function mockExamPage(
+    exams: unknown[],
+    onQuery?: (query: unknown) => void
+  ) {
+    const sortSpy = vi.fn().mockImplementation(() => ({
+      skip: vi.fn().mockReturnValue({
+        limit: vi.fn().mockResolvedValue(exams),
+      }),
+    }));
+    const collationSpy = vi.fn();
+    const chain = { collation: collationSpy, sort: sortSpy };
+    collationSpy.mockReturnValue(chain);
+    vi.spyOn(ExamModel, "find").mockImplementationOnce((query: unknown) => {
+      onQuery?.(query);
+      return chain as never;
+    });
+    vi.spyOn(ExamModel, "countDocuments").mockResolvedValueOnce(
+      exams.length as never
+    );
+    vi.spyOn(AttemptModel, "aggregate").mockResolvedValueOnce([] as never);
+    vi.spyOn(AssignmentModel, "distinct").mockResolvedValueOnce([] as never);
+    return { sortSpy, collationSpy };
+  }
+
+  function examRow(title: string) {
+    return {
+      _id: new mongoose.Types.ObjectId(),
+      title,
+      durationMinutes: 20,
+      status: "published",
+      kind: "practice",
+      sections: [],
+      createdAt: new Date(),
+    };
+  }
+
+  it("filters by skill and search and keeps the default date sort", async () => {
+    let capturedQuery: unknown;
+    const { sortSpy } = mockExamPage([], (query) => {
+      capturedQuery = query;
+    });
+
+    await list(teacherId, "teacher", {
+      skill: "reading",
+      search: "cam 8",
+      page: 1,
+      limit: 10,
+    });
+
+    expect(capturedQuery).toMatchObject({ "sections.skill": "reading" });
+    const and = (capturedQuery as { $and?: Array<Record<string, unknown>> }).$and;
+    expect(and).toHaveLength(1);
+    expect(and?.[0]).toHaveProperty("$or");
+    expect(sortSpy).toHaveBeenCalledWith({ createdAt: -1 });
+  });
+
+  it("uses the requested title sort and natural-sorts the returned page", async () => {
+    const exams = [examRow("CAM 10 - Test 1"), examRow("CAM 8 - Test 1"), examRow("CAM 9 - Test 1")];
+    const { sortSpy, collationSpy } = mockExamPage(exams);
+
+    const result = await list(teacherId, "teacher", {
+      sort: "title_asc",
+      page: 1,
+      limit: 10,
+    });
+
+    expect(collationSpy).toHaveBeenCalledWith({
+      locale: "en",
+      numericOrdering: true,
+    });
+    expect(sortSpy).toHaveBeenCalledWith({ title: 1, createdAt: -1 });
+    expect(result.exams.map((exam) => exam.title)).toEqual([
+      "CAM 8 - Test 1",
+      "CAM 9 - Test 1",
+      "CAM 10 - Test 1",
+    ]);
+  });
+
+  it("uses the collection sort spec when requested", async () => {
+    const { sortSpy, collationSpy } = mockExamPage([]);
+
+    await list(teacherId, "teacher", {
+      sort: "collection_asc",
+      page: 1,
+      limit: 10,
+    });
+
+    expect(collationSpy).toHaveBeenCalledWith({
+      locale: "en",
+      numericOrdering: true,
+    });
+    expect(sortSpy).toHaveBeenCalledWith({
+      "curriculum.collectionName": 1,
+      "curriculum.testNumber": 1,
+      "curriculum.part": 1,
+      title: 1,
+    });
+  });
+
+  it("compares titles naturally so CAM 8 < CAM 9 < CAM 10", () => {
+    expect(compareExamTitles("CAM 8", "CAM 9")).toBeLessThan(0);
+    expect(compareExamTitles("CAM 9", "CAM 10")).toBeLessThan(0);
+    expect(compareExamTitles("CAM 10", "CAM 8")).toBeGreaterThan(0);
+  });
+
+  it("builds alias filters for Cambridge, Vol, Road to IELTS and custom groups", () => {
+    const read = (filter: Record<string, unknown>) => {
+      const or = filter.$or as Array<Record<string, RegExp>>;
+      return or[0]["curriculum.collectionName"];
+    };
+
+    expect(read(buildCollectionFilter("Cambridge")).test("Cam 8")).toBe(true);
+    expect(read(buildCollectionFilter("Cambridge")).test("Cam")).toBe(true);
+    expect(read(buildCollectionFilter("Cambridge")).test("Cambridge IELTS 18")).toBe(true);
+    expect(read(buildCollectionFilter("Cambridge")).test("Actual Test 1")).toBe(false);
+    expect(read(buildCollectionFilter("Vol")).test("Vol 2")).toBe(true);
+    expect(read(buildCollectionFilter("Vol")).test("Volume 1")).toBe(true);
+    expect(read(buildCollectionFilter("Road to IELTS")).test("Road to IELTS 2024")).toBe(true);
+    expect(read(buildCollectionFilter("Actual Test")).test("Actual Test 1")).toBe(true);
   });
 });
 

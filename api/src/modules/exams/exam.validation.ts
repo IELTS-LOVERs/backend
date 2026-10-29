@@ -325,6 +325,12 @@ export const ListExamsSchema = z.object({
     status: z.enum(["draft", "published", "closed"]).optional(),
     kind: z.enum(["practice", "mock"]).optional(),
     type: z.enum(["practice", "mock"]).optional(),
+    skill: SkillEnum.optional(),
+    collectionName: z.string().trim().max(120).optional(),
+    search: z.string().trim().max(200).optional(),
+    sort: z
+      .enum(["date_desc", "date_asc", "title_asc", "title_desc", "collection_asc"])
+      .optional(),
     page: z.coerce.number().int().positive().default(1),
     limit: z.coerce.number().int().positive().max(100).default(20),
   }),

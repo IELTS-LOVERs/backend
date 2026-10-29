@@ -72,6 +72,8 @@ export interface CatalogItem {
   title: string;
   bannerUrl?: string;
   durationMinutes: number;
+  /** Ngày tạo/đăng bài — additive, dùng để sắp xếp ở trang học sinh. */
+  createdAt?: Date;
   questionCount: number;
   totalPoints: number;
   kind: "practice";
@@ -294,6 +296,7 @@ export async function getPracticeCatalog(
       title: exam.title,
       bannerUrl: normalizeBannerUrl(exam.bannerUrl) ?? undefined,
       durationMinutes: exam.durationMinutes,
+      createdAt: exam.createdAt,
       questionCount: totalQCount,
       totalPoints,
       kind: "practice",

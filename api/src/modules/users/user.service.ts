@@ -3,9 +3,11 @@ import mongoose from "mongoose";
 import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import { logger } from "../../common/utils/logger.js";
+import { ClassModel } from "../classes/class.model.js";
 import { UserModel, type IUser, type UserStatus } from "./user.model.js";
 import type {
   CreateUserBody,
+  ListStudentsQuery,
   ListUsersQuery,
   UpdateProfileBody,
 } from "./user.validation.js";
@@ -101,6 +103,111 @@ export async function listUsers(filters: ListUsersQuery): Promise<ListUsersResul
     total,
     totalPages: Math.ceil(total / limit) || 1,
   };
+}
+
+export interface StudentClassRef {
+  id: string;
+  name: string;
+  code: string;
+}
+
+export interface RegisteredStudent {
+  user: IUser;
+  /** Các lớp học sinh đang thuộc về (rỗng = chưa vào lớp nào). */
+  classes: StudentClassRef[];
+}
+
+export interface ListStudentsResult {
+  students: RegisteredStudent[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+/**
+ * Danh sách tài khoản học sinh đã đăng ký, kèm lớp hiện tại.
+ *
+ * Giáo viên dùng danh sách này để biết bạn nào đã có tài khoản mà chưa vào lớp
+ * (bộ lọc `unassigned`) rồi thêm vào lớp bằng email.
+ */
+export async function listRegisteredStudents(
+  filters: ListStudentsQuery
+): Promise<ListStudentsResult> {
+  const query: Record<string, unknown> = { role: "student" };
+
+  if (filters.status) query.status = filters.status;
+
+  if (filters.search && filters.search.trim().length > 0) {
+    const searchRegex = new RegExp(escapeRegExp(filters.search.trim()), "i");
+    query.$or = [{ email: searchRegex }, { fullName: searchRegex }];
+  }
+
+  if (filters.unassigned) {
+    // Chỉ lấy học sinh chưa thuộc bất kỳ lớp nào.
+    const enrolledStudentIds = await ClassModel.distinct("students");
+    query._id = { $nin: enrolledStudentIds };
+  }
+
+  const { page, limit } = filters;
+
+  const [users, total] = await Promise.all([
+    UserModel.find(query)
+      .select("-passwordHash")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    UserModel.countDocuments(query),
+  ]);
+
+  const classesByStudent = await getClassesByStudent(
+    users.map((user) => user._id.toString())
+  );
+
+  return {
+    students: users.map((user) => ({
+      user,
+      classes: classesByStudent.get(user._id.toString()) ?? [],
+    })),
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit) || 1,
+  };
+}
+
+/** Gom lớp của từng học sinh trong một truy vấn (tránh N+1). */
+async function getClassesByStudent(
+  studentIds: string[]
+): Promise<Map<string, StudentClassRef[]>> {
+  const result = new Map<string, StudentClassRef[]>();
+  const validIds = studentIds.filter((id) => mongoose.isValidObjectId(id));
+  if (validIds.length === 0) return result;
+
+  const classes = await ClassModel.find({
+    students: { $in: validIds.map((id) => new mongoose.Types.ObjectId(id)) },
+  })
+    .select("name code students")
+    .sort({ name: 1 });
+
+  const wanted = new Set(validIds);
+  for (const cls of classes) {
+    const ref: StudentClassRef = {
+      id: cls._id.toString(),
+      name: cls.name,
+      code: cls.code,
+    };
+
+    for (const studentId of cls.students) {
+      const key = studentId.toString();
+      if (!wanted.has(key)) continue;
+      const list = result.get(key);
+      if (list) list.push(ref);
+      else result.set(key, [ref]);
+    }
+  }
+
+  return result;
 }
 
 export async function createUser(data: CreateUserBody): Promise<IUser> {

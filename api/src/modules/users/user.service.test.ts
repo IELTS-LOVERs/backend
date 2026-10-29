@@ -1,10 +1,12 @@
 import mongoose from "mongoose";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
+import { ClassModel } from "../classes/class.model.js";
 import { UserModel, type IUser } from "./user.model.js";
 import { toSafeUser } from "./user.serializer.js";
 import {
   createUser,
+  listRegisteredStudents,
   listUsers,
   revokeSessions,
   updateProfile,
@@ -256,5 +258,103 @@ describe("admin user management", () => {
     vi.spyOn(UserModel, "findById").mockResolvedValueOnce(null as never);
 
     await expect(revokeSessions("missing")).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe("listRegisteredStudents", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("only lists student accounts and attaches their current classes", async () => {
+    const studentA = new mongoose.Types.ObjectId();
+    const studentB = new mongoose.Types.ObjectId();
+    const classId = new mongoose.Types.ObjectId();
+    let capturedQuery: Record<string, unknown> | undefined;
+
+    const userFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([
+        { _id: studentA, email: "a@example.com", fullName: "An", role: "student" },
+        { _id: studentB, email: "b@example.com", fullName: "Binh", role: "student" },
+      ]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return userFind as never;
+    });
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(2 as never);
+
+    const classFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockResolvedValue([
+        {
+          _id: classId,
+          name: "IELTS 6.5",
+          code: "ABC123",
+          students: [studentA],
+        },
+      ]),
+    };
+    vi.spyOn(ClassModel, "find").mockReturnValueOnce(classFind as never);
+
+    const result = await listRegisteredStudents({
+      page: 1,
+      limit: 20,
+      unassigned: false,
+    });
+
+    expect(capturedQuery?.role).toBe("student");
+    expect(result.students).toHaveLength(2);
+    expect(result.students[0].classes).toEqual([
+      { id: classId.toString(), name: "IELTS 6.5", code: "ABC123" },
+    ]);
+    expect(result.students[1].classes).toEqual([]);
+  });
+
+  it("filters out enrolled students when unassigned is true", async () => {
+    const enrolled = new mongoose.Types.ObjectId();
+    let capturedQuery: Record<string, unknown> | undefined;
+
+    const userFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return userFind as never;
+    });
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(0 as never);
+    vi.spyOn(ClassModel, "distinct").mockResolvedValueOnce([enrolled] as never);
+
+    await listRegisteredStudents({ page: 1, limit: 20, unassigned: true });
+
+    expect(capturedQuery?._id).toEqual({ $nin: [enrolled] });
+    expect(ClassModel.distinct).toHaveBeenCalledWith("students");
+  });
+
+  it("escapes regex metacharacters in the search term", async () => {
+    let capturedQuery: Record<string, unknown> | undefined;
+
+    const userFind = {
+      select: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(UserModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return userFind as never;
+    });
+    vi.spyOn(UserModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await listRegisteredStudents({ search: "[", page: 1, limit: 20, unassigned: false });
+
+    const or = capturedQuery?.$or as Array<{ email: RegExp }>;
+    expect(or[0].email.source).toBe("\\[");
   });
 });

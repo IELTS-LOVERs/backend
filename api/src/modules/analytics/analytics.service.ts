@@ -5,6 +5,10 @@ import {
   NotFoundError,
 } from "../../common/errors/AppError.js";
 import { canStaffViewStudent } from "../../common/utils/student-access.js";
+import {
+  collectMultiSelectKeys,
+  gradeMultiSelectAnswer,
+} from "../../common/utils/multi-select.js";
 import { matchAnswer } from "../../common/utils/string-normalizer.js";
 import { AttemptModel, type IAttemptScores } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
@@ -109,9 +113,19 @@ export async function getExamAnalytics(
         skill: SkillType;
         part: number;
         acceptedAnswers: string[];
+        multiSelectKeys?: Set<string>;
+        multiSelectSeen?: Set<string>;
       }> = [];
 
       for (const group of section.questionGroups ?? []) {
+        // Multi-answer groups share their key across questions; grade each box
+        // against the union and keep a per-group set of claimed letters.
+        const multiSelectKeys =
+          group.groupType === "multiple_choice_multiple"
+            ? collectMultiSelectKeys(group.questions ?? [])
+            : undefined;
+        const multiSelectSeen = multiSelectKeys ? new Set<string>() : undefined;
+
         for (const q of group.questions ?? []) {
           itemsToProcess.push({
             _id: q._id,
@@ -119,6 +133,8 @@ export async function getExamAnalytics(
             skill: section.skill,
             part: section.part,
             acceptedAnswers: q.acceptedAnswers ?? [],
+            multiSelectKeys,
+            multiSelectSeen,
           });
         }
       }
@@ -129,7 +145,14 @@ export async function getExamAnalytics(
           (candidate) => candidate.questionId.toString() === question._id.toString()
         );
         const isCorrect = Boolean(
-          answer && matchAnswer(answer.value, acceptedAnswers)
+          answer &&
+            (question.multiSelectKeys
+              ? gradeMultiSelectAnswer(
+                  answer.value,
+                  question.multiSelectKeys,
+                  question.multiSelectSeen
+                )
+              : matchAnswer(answer.value, acceptedAnswers))
         );
 
         sectionEntry.totalQuestions += 1;

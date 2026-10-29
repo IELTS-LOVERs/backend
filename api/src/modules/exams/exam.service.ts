@@ -214,10 +214,21 @@ export interface StudentExamDetail extends CandidateExam {
   type?: ExamKind;
 }
 
+export type ExamListSort =
+  | "date_desc"
+  | "date_asc"
+  | "title_asc"
+  | "title_desc"
+  | "collection_asc";
+
 export interface ListExamsFilters {
   status?: ExamStatus;
   kind?: ExamKind;
   type?: ExamKind;
+  skill?: SkillType;
+  collectionName?: string;
+  search?: string;
+  sort?: ExamListSort;
   page: number;
   limit: number;
 }
@@ -227,6 +238,70 @@ interface ExamFilter {
   kind?: ExamKind | { $in: Array<ExamKind | null> };
   createdBy?: string;
   _id?: { $in: Types.ObjectId[] };
+  "sections.skill"?: SkillType;
+  $and?: Array<Record<string, unknown>>;
+}
+
+/** Mongo sort specs for the teacher practice list. */
+export const EXAM_LIST_SORTS: Record<ExamListSort, Record<string, 1 | -1>> = {
+  date_desc: { createdAt: -1 },
+  date_asc: { createdAt: 1 },
+  title_asc: { title: 1, createdAt: -1 },
+  title_desc: { title: -1, createdAt: -1 },
+  collection_asc: {
+    "curriculum.collectionName": 1,
+    "curriculum.testNumber": 1,
+    "curriculum.part": 1,
+    title: 1,
+  },
+};
+
+const naturalTitleCollator = new Intl.Collator("vi", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+/**
+ * Natural title comparison so "CAM 8" sorts before "CAM 9" and "CAM 10"
+ * instead of Mongo's lexicographic "CAM 10" < "CAM 8".
+ */
+export function compareExamTitles(a: string, b: string): number {
+  return naturalTitleCollator.compare(a, b);
+}
+
+/** Escape user input before passing it to `new RegExp` (prevents 500/ReDoS). */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Filter for a book group / curriculum collection.
+ *
+ * Known groups match their common aliases ("Cam 8", "Cambridge IELTS 18",
+ * "Vol 2", "Road to IELTS"). Any other collection name matches literally on
+ * either `curriculum.collectionName` or the exam title, so legacy exams that
+ * only have the book name in their title still show up.
+ */
+export function buildCollectionFilter(
+  collectionName: string
+): Record<string, unknown> {
+  const value = collectionName.trim();
+  const normalized = value.toLowerCase();
+
+  let matcher: RegExp;
+  if (normalized === "cambridge") {
+    matcher = /\bcam(?:bridge)?\b/i;
+  } else if (normalized === "vol") {
+    matcher = /\bvol(?:ume)?\b/i;
+  } else if (normalized === "road to ielts") {
+    matcher = /road\s*to\s*ielts/i;
+  } else {
+    matcher = new RegExp(escapeRegExp(value), "i");
+  }
+
+  return {
+    $or: [{ "curriculum.collectionName": matcher }, { title: matcher }],
+  };
 }
 
 /**
@@ -556,7 +631,17 @@ export async function list(
   total: number;
   totalPages: number;
 }> {
-  const { status, kind, type, page, limit } = filters;
+  const {
+    status,
+    kind,
+    type,
+    skill,
+    collectionName,
+    search,
+    sort,
+    page,
+    limit,
+  } = filters;
   const requestedKind = kind ?? type;
   const query: ExamFilter = {};
 
@@ -570,13 +655,48 @@ export async function list(
     if (requestedKind) query.kind = examKindFilter(requestedKind);
   }
 
+  if (skill) query["sections.skill"] = skill;
+
+  // `collectionName` and `search` each need their own `$or`; keep them under
+  // `$and` so one never overwrites the other.
+  const and: Array<Record<string, unknown>> = [];
+  if (collectionName?.trim()) {
+    and.push(buildCollectionFilter(collectionName));
+  }
+  if (search?.trim()) {
+    const matcher = new RegExp(escapeRegExp(search.trim()), "i");
+    and.push({
+      $or: [{ title: matcher }, { "curriculum.collectionName": matcher }],
+    });
+  }
+  if (and.length > 0) query.$and = and;
+
+  const sortSpec = EXAM_LIST_SORTS[sort ?? "date_desc"];
+  const examsQuery = ExamModel.find(query);
+
+  // `numericOrdering` makes Mongo sort "CAM 8" before "CAM 9"/"CAM 10" across
+  // the whole result set (not just the current page).
+  if (
+    (sort === "title_asc" || sort === "title_desc" || sort === "collection_asc") &&
+    typeof examsQuery.collation === "function"
+  ) {
+    examsQuery.collation({ locale: "en", numericOrdering: true });
+  }
+
   const [exams, total] = await Promise.all([
-    ExamModel.find(query)
-      .sort({ createdAt: -1 })
+    examsQuery
+      .sort(sortSpec)
       .skip((page - 1) * limit)
       .limit(limit),
     ExamModel.countDocuments(query),
   ]);
+
+  // Mongo compares titles lexicographically; re-sort the page naturally for the
+  // alphabet modes so CAM 8 comes before CAM 9/CAM 10.
+  if (sort === "title_asc" || sort === "title_desc") {
+    const direction = sort === "title_asc" ? 1 : -1;
+    exams.sort((a, b) => direction * compareExamTitles(a.title, b.title));
+  }
 
   // Teacher/admin views need to know whether each exam can be deleted or edited.
   // One extra pair of queries per page (never per row), skipped for students.
