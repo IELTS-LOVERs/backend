@@ -23,9 +23,9 @@ function requireUser(req: Request): NonNullable<Request["user"]> {
 export async function listCollections(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const query = req.query as unknown as ListCollectionsQuery;
-  const { collections, page, limit, total, totalPages } =
+  const { collections, allCategories, page, limit, total, totalPages } =
     await collectionService.listCollections(user.id, user.role, query);
-  sendSuccess(res, collections, 200, { page, limit, total, totalPages });
+  sendSuccess(res, collections, 200, { page, limit, total, totalPages, allCategories });
 }
 
 export async function getCollection(req: Request, res: Response): Promise<void> {

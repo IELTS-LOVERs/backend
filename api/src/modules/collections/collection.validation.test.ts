@@ -17,8 +17,21 @@ describe("Collection Validation Schemas", () => {
       });
       expect(parsed.success).toBe(true);
       if (parsed.success) {
-        expect(parsed.data.body.category).toBe("custom");
+        expect(parsed.data.body.category).toBe("Giáo trình trung tâm");
         expect(parsed.data.body.orderIndex).toBe(0);
+      }
+    });
+
+    it("accepts custom category string", () => {
+      const parsed = CreateCollectionSchema.safeParse({
+        body: {
+          name: "Cambridge IELTS 19",
+          category: "Forecast 2026",
+        },
+      });
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.body.category).toBe("Forecast 2026");
       }
     });
 
@@ -26,16 +39,6 @@ describe("Collection Validation Schemas", () => {
       const parsed = CreateCollectionSchema.safeParse({
         body: {
           name: "C",
-        },
-      });
-      expect(parsed.success).toBe(false);
-    });
-
-    it("fails when category is invalid", () => {
-      const parsed = CreateCollectionSchema.safeParse({
-        body: {
-          name: "Cambridge IELTS 19",
-          category: "invalid_category",
         },
       });
       expect(parsed.success).toBe(false);

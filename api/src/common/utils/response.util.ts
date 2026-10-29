@@ -7,6 +7,8 @@ export interface ResponseMeta {
   total?: number;
   totalPages?: number;
   totalPending?: number;
+  allCategories?: string[];
+  [key: string]: unknown;
 }
 
 export interface SuccessBody<T> {

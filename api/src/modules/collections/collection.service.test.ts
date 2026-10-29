@@ -93,6 +93,10 @@ describe("Collection Service", () => {
         exec: vi.fn().mockResolvedValue(1),
       } as never);
 
+      vi.spyOn(CollectionModel, "distinct").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(["cambridge"]),
+      } as never);
+
       vi.spyOn(ExamModel, "aggregate").mockResolvedValue([
         {
           _id: "Cambridge IELTS 18",

@@ -64,6 +64,7 @@ export async function listCollections(
   query: ListCollectionsQuery
 ): Promise<{
   collections: CollectionWithStats[];
+  allCategories: string[];
   page: number;
   limit: number;
   total: number;
@@ -75,19 +76,20 @@ export async function listCollections(
     filter.name = { $regex: new RegExp(escapeRegex(query.search), "i") };
   }
   if (query.category) {
-    filter.category = query.category;
+    filter.category = { $regex: new RegExp(`^${escapeRegex(query.category)}$`, "i") };
   }
 
   const page = query.page ?? 1;
   const limit = query.limit ?? 50;
   const skip = (page - 1) * limit;
 
-  const [rawDocs, total] = await Promise.all([
+  const [rawDocs, total, distinctCategories] = await Promise.all([
     CollectionModel.find(filter)
       .sort({ orderIndex: 1, createdAt: -1 })
       .lean()
       .exec(),
     CollectionModel.countDocuments(filter).exec(),
+    CollectionModel.distinct("category").exec(),
   ]);
 
   // Natural sort by name if orderIndex is same
@@ -170,6 +172,7 @@ export async function listCollections(
 
   return {
     collections,
+    allCategories: (distinctCategories as string[]).filter(Boolean),
     page,
     limit,
     total,

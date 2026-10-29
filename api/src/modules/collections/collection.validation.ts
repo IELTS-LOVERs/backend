@@ -1,17 +1,15 @@
 import { z } from "zod";
 
-export const CollectionCategoryEnum = z.enum([
-  "cambridge",
-  "vol",
-  "road_to_ielts",
-  "custom",
-  "other",
-]);
+export const CollectionCategorySchema = z
+  .string()
+  .trim()
+  .min(1, "Vui lòng nhập thể loại / dòng giáo trình")
+  .max(60, "Tên thể loại tối đa 60 ký tự");
 
 export const CreateCollectionSchema = z.object({
   body: z.object({
     name: z.string().trim().min(2, "Tên bộ đề tối thiểu 2 ký tự").max(120, "Tên bộ đề tối đa 120 ký tự"),
-    category: CollectionCategoryEnum.default("custom"),
+    category: CollectionCategorySchema.default("Giáo trình trung tâm"),
     description: z.string().trim().max(500, "Mô tả tối đa 500 ký tự").optional(),
     bannerUrl: z.string().trim().optional(),
     orderIndex: z.number().int().min(0).default(0),
@@ -24,7 +22,7 @@ export const UpdateCollectionSchema = z.object({
   }),
   body: z.object({
     name: z.string().trim().min(2, "Tên bộ đề tối thiểu 2 ký tự").max(120, "Tên bộ đề tối đa 120 ký tự").optional(),
-    category: CollectionCategoryEnum.optional(),
+    category: CollectionCategorySchema.optional(),
     description: z.string().trim().max(500, "Mô tả tối đa 500 ký tự").optional().nullable(),
     bannerUrl: z.string().trim().optional().nullable(),
     orderIndex: z.number().int().min(0).optional(),
@@ -46,7 +44,7 @@ export const DeleteCollectionSchema = z.object({
 export const ListCollectionsSchema = z.object({
   query: z.object({
     search: z.string().trim().max(200).optional(),
-    category: CollectionCategoryEnum.optional(),
+    category: z.string().trim().max(60).optional(),
     page: z.coerce.number().int().positive().default(1),
     limit: z.coerce.number().int().positive().max(100).default(50),
   }),

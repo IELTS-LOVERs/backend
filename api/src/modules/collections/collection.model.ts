@@ -2,7 +2,7 @@ import mongoose, { type Types } from "mongoose";
 
 const { Schema, model } = mongoose;
 
-export type CollectionCategory = "cambridge" | "vol" | "road_to_ielts" | "custom" | "other";
+export type CollectionCategory = string;
 
 export interface ICollection extends mongoose.Document {
   _id: Types.ObjectId;
@@ -21,8 +21,8 @@ const CollectionSchema = new Schema<ICollection>(
     name: { type: String, required: true, trim: true, minlength: 2, maxlength: 120 },
     category: {
       type: String,
-      enum: ["cambridge", "vol", "road_to_ielts", "custom", "other"],
-      default: "custom",
+      trim: true,
+      default: "Giáo trình trung tâm",
     },
     description: { type: String, trim: true, maxlength: 500 },
     bannerUrl: { type: String, trim: true },

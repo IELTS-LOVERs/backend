@@ -32,24 +32,18 @@ describe("CollectionModel", () => {
     });
 
     await expect(doc.validate()).resolves.toBeUndefined();
-    expect(doc.category).toBe("custom");
+    expect(doc.category).toBe("Giáo trình trung tâm");
     expect(doc.orderIndex).toBe(0);
   });
 
-  it("rejects invalid categories", async () => {
+  it("accepts custom categories", async () => {
     const doc = new CollectionModel({
       name: "Cambridge IELTS 18",
-      category: "invalid_category",
+      category: "IELTS Forecast Quý 1",
       createdBy: new mongoose.Types.ObjectId(),
     });
 
-    let error: ValidationError | undefined;
-    try {
-      await doc.validate();
-    } catch (err) {
-      error = err as ValidationError;
-    }
-
-    expect(error?.errors.category).toBeDefined();
+    await expect(doc.validate()).resolves.toBeUndefined();
+    expect(doc.category).toBe("IELTS Forecast Quý 1");
   });
 });
