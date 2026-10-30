@@ -6,8 +6,7 @@ import { ClassModel } from "../classes/class.model.js";
 import {
   ExamModel,
   type ExamKind,
-  type ExamType,
-  type ICurriculum,
+  type IExamCurriculum,
   type IExam,
 } from "../exams/exam.model.js";
 import { UserModel } from "../users/user.model.js";
@@ -49,15 +48,15 @@ export interface MyAssignment {
   scores: IAttemptScores | null;
   kind?: ExamKind;
   examKind?: ExamKind;
-  type: ExamType;
-  curriculum?: ICurriculum;
+  type: ExamKind;
+  curriculum?: IExamCurriculum;
 }
 
 export interface MyAssignmentsFilters {
   classId?: string;
   status?: SubmissionStatus | "all";
   kind?: ExamKind;
-  type?: ExamType | "exam";
+  type?: ExamKind | "exam";
 }
 
 export interface AssignmentDetail {
@@ -86,8 +85,8 @@ interface PopulatedExam {
   _id: Types.ObjectId;
   title: string;
   durationMinutes: number;
-  type?: ExamType;
-  curriculum?: ICurriculum;
+  type?: ExamKind;
+  curriculum?: IExamCurriculum;
 }
 
 interface PopulatedTeacher {
@@ -409,8 +408,8 @@ export async function getMyAssignments(
     classId: string | null;
     className: string | null;
     kind: ExamKind;
-    type: ExamType;
-    curriculum?: ICurriculum;
+    type: ExamKind;
+    curriculum?: IExamCurriculum;
   }> = [];
 
   for (const assignment of assignments) {
@@ -419,7 +418,7 @@ export async function getMyAssignments(
     if (!exam) continue;
 
     const examKind: ExamKind = exam.kind ?? (exam.type === "practice" ? "practice" : "mock");
-    const examType: ExamType = examKind;
+    const examType: ExamKind = examKind;
 
     const requestedKind: ExamKind | undefined =
       filters.kind ??
@@ -557,7 +556,7 @@ export interface AssignmentProgressResult {
 export async function getAssignmentsForTeacher(
   teacherId: string,
   role: string,
-  filters: { classId?: string; examId?: string; kind?: ExamKind; type?: ExamType | "exam"; page: number; limit: number }
+  filters: { classId?: string; examId?: string; kind?: ExamKind; type?: ExamKind | "exam"; page: number; limit: number }
 ): Promise<{
   assignments: unknown[];
   meta: { page: number; limit: number; total: number; totalPages: number };
