@@ -17,6 +17,8 @@ function escapeRegex(text: string): string {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
 }
 
+const naturalEnCollator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+
 export interface CollectionWithStats {
   _id: string;
   name: string;
@@ -92,13 +94,11 @@ export async function listCollections(
     CollectionModel.distinct("category").exec(),
   ]);
 
-  // Natural sort by name if orderIndex is same
-  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
   rawDocs.sort((a, b) => {
     if (a.orderIndex !== b.orderIndex) {
       return a.orderIndex - b.orderIndex;
     }
-    return collator.compare(a.name, b.name);
+    return naturalEnCollator.compare(a.name, b.name);
   });
 
   const pagedDocs = rawDocs.slice(skip, skip + limit);
@@ -197,8 +197,6 @@ export async function getCollectionDetail(
     .lean()
     .exec();
 
-  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
-
   exams.sort((a, b) => {
     const testA = a.curriculum?.testNumber ?? 9999;
     const testB = b.curriculum?.testNumber ?? 9999;
@@ -212,7 +210,7 @@ export async function getCollectionDetail(
     const orderB = b.curriculum?.orderIndex ?? 0;
     if (orderA !== orderB) return orderA - orderB;
 
-    return collator.compare(a.title, b.title);
+    return naturalEnCollator.compare(a.title, b.title);
   });
 
   const formattedExams = exams.map((exam) => ({

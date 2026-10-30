@@ -67,7 +67,9 @@ export async function getStudentDashboard(
         status: { $in: ["submitted", "expired"] },
         "scores.overallBand": { $ne: null },
         $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
-      }).select("scores.overallBand"),
+      })
+        .select("scores.overallBand")
+        .lean(),
       getMyAttempts(studentId, { page: 1, limit: 5 }),
     ]);
 
@@ -101,7 +103,7 @@ export async function getTeacherDashboard(
   const isAdmin = role === "admin";
   const classFilter = isAdmin ? {} : { teacherId: userId };
 
-  const classes = await ClassModel.find(classFilter).select("_id students");
+  const classes = await ClassModel.find(classFilter).select("_id students").lean();
   const totalClasses = classes.length;
 
   // Aggregate unique student IDs across managed classes
@@ -138,12 +140,15 @@ export async function getTeacherDashboard(
       ...attemptFilter,
       "scores.overallBand": { $ne: null },
       $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
-    }).select("scores.overallBand"),
+    })
+      .select("scores.overallBand")
+      .lean(),
     AttemptModel.find(attemptFilter)
       .populate("studentId", "fullName email")
       .populate("examId", "title")
       .sort({ submittedAt: -1 })
-      .limit(5),
+      .limit(5)
+      .lean(),
   ]);
 
   const bandScores = scoredAttempts.map(
