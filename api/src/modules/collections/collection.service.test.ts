@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { CollectionModel } from "./collection.model.js";
 import {
@@ -8,8 +8,10 @@ import {
   createCollection,
   deleteCollection,
   getCollectionDetail,
+  getCollectionTree,
   listCollections,
   removeExamFromCollection,
+  reorderExamsInCollection,
   updateCollection,
   updateExamInCollection,
 } from "./collection.service.js";
@@ -25,13 +27,16 @@ describe("Collection Service", () => {
   describe("createCollection", () => {
     it("creates collection when name is unique", async () => {
       vi.spyOn(CollectionModel, "findOne").mockReturnValue({
+        sort: vi.fn().mockReturnValue({
+          exec: vi.fn().mockResolvedValue(null),
+        }),
         exec: vi.fn().mockResolvedValue(null),
       } as never);
 
       const mockCol = {
         _id: collectionId,
         name: "Cambridge IELTS 18",
-        category: "cambridge",
+        parentId: null,
         orderIndex: 0,
         createdBy: teacherId,
       };
@@ -41,7 +46,6 @@ describe("Collection Service", () => {
       const res = await createCollection(
         {
           name: "Cambridge IELTS 18",
-          category: "cambridge",
           orderIndex: 0,
         },
         teacherId
@@ -60,21 +64,46 @@ describe("Collection Service", () => {
         createCollection(
           {
             name: "Cambridge IELTS 18",
-            category: "cambridge",
           },
           teacherId
         )
       ).rejects.toThrow(ConflictError);
     });
+
+    it("throws BadRequestError if parent collection is already a sub-collection (max 2 levels)", async () => {
+      vi.spyOn(CollectionModel, "findOne").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(null),
+      } as never);
+
+      const mockParent = {
+        _id: new mongoose.Types.ObjectId(),
+        name: "Cam 18",
+        parentId: new mongoose.Types.ObjectId(), // has parent -> cannot be parent
+      };
+
+      vi.spyOn(CollectionModel, "findById").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(mockParent),
+      } as never);
+
+      await expect(
+        createCollection(
+          {
+            name: "Cam 18 Sub",
+            parentId: mockParent._id.toString(),
+          },
+          teacherId
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
   });
 
   describe("listCollections", () => {
-    it("lists collections and aggregates exam stats", async () => {
+    it("lists collections and aggregates exam stats and childCount", async () => {
       const mockDocs = [
         {
           _id: collectionId,
-          name: "Cambridge IELTS 18",
-          category: "cambridge",
+          name: "Cambridge",
+          parentId: null,
           orderIndex: 1,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -93,13 +122,13 @@ describe("Collection Service", () => {
         exec: vi.fn().mockResolvedValue(1),
       } as never);
 
-      vi.spyOn(CollectionModel, "distinct").mockReturnValue({
-        exec: vi.fn().mockResolvedValue(["cambridge"]),
-      } as never);
+      vi.spyOn(CollectionModel, "aggregate").mockResolvedValue([
+        { _id: collectionId, count: 2 },
+      ] as never);
 
       vi.spyOn(ExamModel, "aggregate").mockResolvedValue([
         {
-          _id: "Cambridge IELTS 18",
+          _id: "Cambridge",
           totalExams: 4,
           readingCount: 2,
           listeningCount: 2,
@@ -109,11 +138,55 @@ describe("Collection Service", () => {
 
       const res = await listCollections(teacherId, "teacher", { page: 1, limit: 10 });
       expect(res.collections).toHaveLength(1);
-      expect(res.collections[0].name).toBe("Cambridge IELTS 18");
+      expect(res.collections[0].name).toBe("Cambridge");
+      expect(res.collections[0].childCount).toBe(2);
       expect(res.collections[0].examCount).toBe(4);
-      expect(res.collections[0].readingCount).toBe(2);
-      expect(res.collections[0].listeningCount).toBe(2);
-      expect(res.collections[0].writingCount).toBe(0);
+    });
+  });
+
+  describe("getCollectionTree", () => {
+    it("builds hierarchy with root and children and combined exam counts", async () => {
+      const rootId = new mongoose.Types.ObjectId();
+      const childId = new mongoose.Types.ObjectId();
+
+      const allDocs = [
+        {
+          _id: rootId,
+          name: "Cambridge",
+          parentId: null,
+          orderIndex: 0,
+        },
+        {
+          _id: childId,
+          name: "Cambridge 18",
+          parentId: rootId,
+          orderIndex: 0,
+        },
+      ];
+
+      vi.spyOn(CollectionModel, "find").mockReturnValue({
+        lean: vi.fn().mockReturnValue({
+          exec: vi.fn().mockResolvedValue(allDocs),
+        }),
+      } as never);
+
+      vi.spyOn(ExamModel, "aggregate").mockResolvedValue([
+        {
+          _id: "Cambridge 18",
+          totalExams: 4,
+          readingCount: 4,
+          listeningCount: 0,
+          writingCount: 0,
+        },
+      ] as never);
+
+      const tree = await getCollectionTree();
+      expect(tree).toHaveLength(1);
+      expect(tree[0].name).toBe("Cambridge");
+      expect(tree[0].children).toHaveLength(1);
+      expect(tree[0].children[0].name).toBe("Cambridge 18");
+      expect(tree[0].examCount).toBe(4);
+      expect(tree[0].directExamCount).toBe(0);
     });
   });
 
@@ -122,7 +195,6 @@ describe("Collection Service", () => {
       const mockCol = {
         _id: collectionId,
         name: "Cambridge IELTS 18",
-        category: "cambridge",
       };
 
       vi.spyOn(CollectionModel, "findById").mockReturnValue({
@@ -133,13 +205,13 @@ describe("Collection Service", () => {
         {
           _id: new mongoose.Types.ObjectId(),
           title: "CAM 18 TEST 2 READING PASSAGE 1",
-          curriculum: { testNumber: 2, part: 1 },
+          curriculum: { testNumber: 2, orderIndex: 0, part: 1 },
           sections: [{ skill: "reading", part: 1 }],
         },
         {
           _id: new mongoose.Types.ObjectId(),
           title: "CAM 18 TEST 1 READING PASSAGE 1",
-          curriculum: { testNumber: 1, part: 1 },
+          curriculum: { testNumber: 1, orderIndex: 0, part: 1 },
           sections: [{ skill: "reading", part: 1 }],
         },
       ];
@@ -155,7 +227,6 @@ describe("Collection Service", () => {
       const res = await getCollectionDetail(collectionId, teacherId, "teacher");
       expect(res.collection.name).toBe("Cambridge IELTS 18");
       expect(res.exams).toHaveLength(2);
-      // Sorted by testNumber asc: Test 1 before Test 2
       expect(res.exams[0].curriculum?.testNumber).toBe(1);
       expect(res.exams[1].curriculum?.testNumber).toBe(2);
     });
@@ -176,7 +247,6 @@ describe("Collection Service", () => {
       const mockCol = {
         _id: collectionId,
         name: "Old Collection Name",
-        category: "custom",
         save: vi.fn().mockResolvedValue(undefined),
       };
 
@@ -206,10 +276,25 @@ describe("Collection Service", () => {
       );
       expect(mockCol.save).toHaveBeenCalled();
     });
+
+    it("prevents assigning parent to itself", async () => {
+      const mockCol = {
+        _id: collectionId,
+        name: "Collection A",
+      };
+
+      vi.spyOn(CollectionModel, "findById").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(mockCol),
+      } as never);
+
+      await expect(
+        updateCollection(collectionId, { parentId: collectionId }, teacherId, "teacher")
+      ).rejects.toThrow(BadRequestError);
+    });
   });
 
   describe("deleteCollection", () => {
-    it("unlinks exams and deletes collection doc", async () => {
+    it("promotes children to root, unlinks exams and deletes collection doc", async () => {
       const mockCol = {
         _id: collectionId,
         name: "Collection To Delete",
@@ -217,6 +302,10 @@ describe("Collection Service", () => {
 
       vi.spyOn(CollectionModel, "findById").mockReturnValue({
         exec: vi.fn().mockResolvedValue(mockCol),
+      } as never);
+
+      const updateColSpy = vi.spyOn(CollectionModel, "updateMany").mockReturnValue({
+        exec: vi.fn().mockResolvedValue({ modifiedCount: 2 }),
       } as never);
 
       const updateExamsSpy = vi.spyOn(ExamModel, "updateMany").mockReturnValue({
@@ -229,6 +318,10 @@ describe("Collection Service", () => {
 
       const res = await deleteCollection(collectionId, teacherId, "teacher");
       expect(res.id).toBe(collectionId);
+      expect(updateColSpy).toHaveBeenCalledWith(
+        { parentId: collectionId },
+        { $set: { parentId: null } }
+      );
       expect(updateExamsSpy).toHaveBeenCalledWith(
         { "curriculum.collectionName": "Collection To Delete" },
         { $set: { "curriculum.collectionName": null } }
@@ -248,6 +341,10 @@ describe("Collection Service", () => {
         exec: vi.fn().mockResolvedValue(mockCol),
       } as never);
 
+      vi.spyOn(CollectionModel, "exists").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(null),
+      } as never);
+
       const bulkWriteSpy = vi.spyOn(ExamModel, "bulkWrite").mockResolvedValue({
         modifiedCount: 2,
       } as never);
@@ -258,6 +355,64 @@ describe("Collection Service", () => {
           examIds: ["exam1", "exam2"],
           testNumber: 1,
           part: 1,
+        },
+        teacherId,
+        "teacher"
+      );
+
+      expect(res.count).toBe(2);
+      expect(bulkWriteSpy).toHaveBeenCalled();
+    });
+
+    it("throws ConflictError if collection already has child collections", async () => {
+      const mockCol = {
+        _id: collectionId,
+        name: "Cambridge Root",
+      };
+
+      vi.spyOn(CollectionModel, "findById").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(mockCol),
+      } as never);
+
+      vi.spyOn(CollectionModel, "exists").mockReturnValue({
+        exec: vi.fn().mockResolvedValue({ _id: "child1" }),
+      } as never);
+
+      await expect(
+        addExamsToCollection(
+          collectionId,
+          {
+            examIds: ["exam1"],
+          },
+          teacherId,
+          "teacher"
+        )
+      ).rejects.toThrow(ConflictError);
+    });
+  });
+
+  describe("reorderExamsInCollection", () => {
+    it("performs bulkWrite to reorder exams", async () => {
+      const mockCol = {
+        _id: collectionId,
+        name: "Cambridge IELTS 18",
+      };
+
+      vi.spyOn(CollectionModel, "findById").mockReturnValue({
+        exec: vi.fn().mockResolvedValue(mockCol),
+      } as never);
+
+      const bulkWriteSpy = vi.spyOn(ExamModel, "bulkWrite").mockResolvedValue({
+        modifiedCount: 2,
+      } as never);
+
+      const res = await reorderExamsInCollection(
+        collectionId,
+        {
+          items: [
+            { examId: "ex1", testNumber: 1, orderIndex: 0 },
+            { examId: "ex2", testNumber: 1, orderIndex: 1 },
+          ],
         },
         teacherId,
         "teacher"

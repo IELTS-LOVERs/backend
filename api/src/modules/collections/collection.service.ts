@@ -1,14 +1,15 @@
-import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
+import mongoose, { type Types } from "mongoose";
+import { BadRequestError, ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel } from "../exams/exam.model.js";
 import {
   CollectionModel,
-  type CollectionCategory,
   type ICollection,
 } from "./collection.model.js";
 import type {
   AddExamsToCollectionBody,
   CreateCollectionBody,
   ListCollectionsQuery,
+  ReorderExamsInCollectionBody,
   UpdateCollectionBody,
   UpdateExamInCollectionBody,
 } from "./collection.validation.js";
@@ -20,16 +21,42 @@ function escapeRegex(text: string): string {
 export interface CollectionWithStats {
   _id: string;
   name: string;
-  category: CollectionCategory;
+  parentId?: string | null;
   description?: string;
   bannerUrl?: string;
   orderIndex: number;
+  childCount: number;
   examCount: number;
   readingCount: number;
   listeningCount: number;
   writingCount: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface CollectionTreeNode {
+  _id: string;
+  name: string;
+  description?: string;
+  bannerUrl?: string;
+  orderIndex: number;
+  examCount: number;
+  directExamCount: number;
+  readingCount: number;
+  listeningCount: number;
+  writingCount: number;
+  children: Array<{
+    _id: string;
+    name: string;
+    parentId: string;
+    description?: string;
+    bannerUrl?: string;
+    orderIndex: number;
+    examCount: number;
+    readingCount: number;
+    listeningCount: number;
+    writingCount: number;
+  }>;
 }
 
 export interface CollectionDetailResponse {
@@ -64,7 +91,6 @@ export async function listCollections(
   query: ListCollectionsQuery
 ): Promise<{
   collections: CollectionWithStats[];
-  allCategories: string[];
   page: number;
   limit: number;
   total: number;
@@ -75,25 +101,28 @@ export async function listCollections(
   if (query.search) {
     filter.name = { $regex: new RegExp(escapeRegex(query.search), "i") };
   }
-  if (query.category) {
-    filter.category = { $regex: new RegExp(`^${escapeRegex(query.category)}$`, "i") };
+  if (query.parentId !== undefined) {
+    if (query.parentId === "null" || query.parentId === "") {
+      filter.parentId = null;
+    } else {
+      filter.parentId = new mongoose.Types.ObjectId(query.parentId);
+    }
   }
 
   const page = query.page ?? 1;
   const limit = query.limit ?? 50;
   const skip = (page - 1) * limit;
 
-  const [rawDocs, total, distinctCategories] = await Promise.all([
+  const [rawDocs, total] = await Promise.all([
     CollectionModel.find(filter)
       .sort({ orderIndex: 1, createdAt: -1 })
       .lean()
       .exec(),
     CollectionModel.countDocuments(filter).exec(),
-    CollectionModel.distinct("category").exec(),
   ]);
 
   // Natural sort by name if orderIndex is same
-  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+  const collator = new Intl.Collator("vi", { numeric: true, sensitivity: "base" });
   rawDocs.sort((a, b) => {
     if (a.orderIndex !== b.orderIndex) {
       return a.orderIndex - b.orderIndex;
@@ -102,6 +131,17 @@ export async function listCollections(
   });
 
   const pagedDocs = rawDocs.slice(skip, skip + limit);
+
+  // Aggregate children count for each doc
+  const docIds = pagedDocs.map((doc) => doc._id);
+  const childCounts = await CollectionModel.aggregate([
+    { $match: { parentId: { $in: docIds } } },
+    { $group: { _id: "$parentId", count: { $sum: 1 } } },
+  ]);
+  const childCountMap = new Map<string, number>();
+  for (const item of childCounts) {
+    childCountMap.set(String(item._id), item.count);
+  }
 
   // Aggregate exam counts per collection
   const collectionNames = pagedDocs.map((doc) => doc.name);
@@ -157,10 +197,11 @@ export async function listCollections(
     return {
       _id: String(doc._id),
       name: doc.name,
-      category: doc.category,
+      parentId: doc.parentId ? String(doc.parentId) : null,
       description: doc.description,
       bannerUrl: doc.bannerUrl,
       orderIndex: doc.orderIndex,
+      childCount: childCountMap.get(String(doc._id)) || 0,
       examCount: stats.totalExams,
       readingCount: stats.readingCount,
       listeningCount: stats.listeningCount,
@@ -172,12 +213,131 @@ export async function listCollections(
 
   return {
     collections,
-    allCategories: (distinctCategories as string[]).filter(Boolean),
     page,
     limit,
     total,
     totalPages: Math.ceil(total / limit) || 1,
   };
+}
+
+export async function getCollectionTree(): Promise<CollectionTreeNode[]> {
+  const allCollections = await CollectionModel.find({}).lean().exec();
+  const collator = new Intl.Collator("vi", { numeric: true, sensitivity: "base" });
+
+  // Natural sort
+  allCollections.sort((a, b) => {
+    if (a.orderIndex !== b.orderIndex) return a.orderIndex - b.orderIndex;
+    return collator.compare(a.name, b.name);
+  });
+
+  // Collect exam statistics
+  const examStats = await ExamModel.aggregate([
+    {
+      $match: {
+        "curriculum.collectionName": { $exists: true, $ne: null },
+      },
+    },
+    {
+      $project: {
+        collectionName: "$curriculum.collectionName",
+        skills: "$sections.skill",
+      },
+    },
+    {
+      $group: {
+        _id: "$collectionName",
+        totalExams: { $sum: 1 },
+        readingCount: {
+          $sum: { $cond: [{ $in: ["reading", "$skills"] }, 1, 0] },
+        },
+        listeningCount: {
+          $sum: { $cond: [{ $in: ["listening", "$skills"] }, 1, 0] },
+        },
+        writingCount: {
+          $sum: { $cond: [{ $in: ["writing", "$skills"] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+
+  const statsMap = new Map<string, { totalExams: number; readingCount: number; listeningCount: number; writingCount: number }>();
+  for (const stat of examStats) {
+    if (stat._id) {
+      statsMap.set(String(stat._id).toLowerCase(), {
+        totalExams: stat.totalExams || 0,
+        readingCount: stat.readingCount || 0,
+        listeningCount: stat.listeningCount || 0,
+        writingCount: stat.writingCount || 0,
+      });
+    }
+  }
+
+  const roots: CollectionTreeNode[] = [];
+  const childrenByParent = new Map<string, typeof allCollections>();
+
+  for (const col of allCollections) {
+    if (col.parentId) {
+      const pId = String(col.parentId);
+      if (!childrenByParent.has(pId)) childrenByParent.set(pId, []);
+      childrenByParent.get(pId)!.push(col);
+    }
+  }
+
+  for (const root of allCollections) {
+    if (!root.parentId) {
+      const rootId = String(root._id);
+      const rootStats = statsMap.get(root.name.toLowerCase()) || {
+        totalExams: 0,
+        readingCount: 0,
+        listeningCount: 0,
+        writingCount: 0,
+      };
+
+      const childDocs = childrenByParent.get(rootId) || [];
+      const formattedChildren = childDocs.map((c) => {
+        const cStats = statsMap.get(c.name.toLowerCase()) || {
+          totalExams: 0,
+          readingCount: 0,
+          listeningCount: 0,
+          writingCount: 0,
+        };
+        return {
+          _id: String(c._id),
+          name: c.name,
+          parentId: rootId,
+          description: c.description,
+          bannerUrl: c.bannerUrl,
+          orderIndex: c.orderIndex,
+          examCount: cStats.totalExams,
+          readingCount: cStats.readingCount,
+          listeningCount: cStats.listeningCount,
+          writingCount: cStats.writingCount,
+        };
+      });
+
+      // Sum stats for root = direct + children
+      const totalExamCount = rootStats.totalExams + formattedChildren.reduce((acc, c) => acc + c.examCount, 0);
+      const totalReadingCount = rootStats.readingCount + formattedChildren.reduce((acc, c) => acc + c.readingCount, 0);
+      const totalListeningCount = rootStats.listeningCount + formattedChildren.reduce((acc, c) => acc + c.listeningCount, 0);
+      const totalWritingCount = rootStats.writingCount + formattedChildren.reduce((acc, c) => acc + c.writingCount, 0);
+
+      roots.push({
+        _id: rootId,
+        name: root.name,
+        description: root.description,
+        bannerUrl: root.bannerUrl,
+        orderIndex: root.orderIndex,
+        examCount: totalExamCount,
+        directExamCount: rootStats.totalExams,
+        readingCount: totalReadingCount,
+        listeningCount: totalListeningCount,
+        writingCount: totalWritingCount,
+        children: formattedChildren,
+      });
+    }
+  }
+
+  return roots;
 }
 
 export async function getCollectionDetail(
@@ -197,20 +357,21 @@ export async function getCollectionDetail(
     .lean()
     .exec();
 
-  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+  const collator = new Intl.Collator("vi", { numeric: true, sensitivity: "base" });
 
+  // Unified sorting: Test -> orderIndex -> Part -> title
   exams.sort((a, b) => {
     const testA = a.curriculum?.testNumber ?? 9999;
     const testB = b.curriculum?.testNumber ?? 9999;
     if (testA !== testB) return testA - testB;
 
-    const partA = a.curriculum?.part ?? 9999;
-    const partB = b.curriculum?.part ?? 9999;
-    if (partA !== partB) return partA - partB;
-
     const orderA = a.curriculum?.orderIndex ?? 0;
     const orderB = b.curriculum?.orderIndex ?? 0;
     if (orderA !== orderB) return orderA - orderB;
+
+    const partA = a.curriculum?.part ?? 9999;
+    const partB = b.curriculum?.part ?? 9999;
+    if (partA !== partB) return partA - partB;
 
     return collator.compare(a.title, b.title);
   });
@@ -244,19 +405,41 @@ export async function createCollection(
   userId: string
 ): Promise<ICollection> {
   const existing = await CollectionModel.findOne({
-    name: { $regex: new RegExp(`^${escapeRegex(data.name)}$`, "i") },
+    name: { $regex: new RegExp(`^${escapeRegex(data.name.trim())}$`, "i") },
   }).exec();
 
   if (existing) {
     throw new ConflictError("COLLECTION_EXISTS", "Tên nhóm bộ đề đã tồn tại.");
   }
 
+  let parentObjectId: Types.ObjectId | null = null;
+  if (data.parentId) {
+    const parent = await CollectionModel.findById(data.parentId).exec();
+    if (!parent) {
+      throw new NotFoundError("Không tìm thấy bộ đề cha.");
+    }
+    // Max 2 levels: parent must be root
+    if (parent.parentId) {
+      throw new BadRequestError("INVALID_PARENT", "Hệ thống chỉ hỗ trợ tối đa 2 cấp bộ đề (Gốc -> Bộ con).");
+    }
+    parentObjectId = parent._id;
+  }
+
+  // Calculate default orderIndex if not given
+  let orderIndex = data.orderIndex ?? 0;
+  if (data.orderIndex === undefined || data.orderIndex === 0) {
+    const lastSibling = await CollectionModel.findOne({ parentId: parentObjectId })
+      .sort({ orderIndex: -1 })
+      .exec();
+    orderIndex = lastSibling ? lastSibling.orderIndex + 1 : 0;
+  }
+
   const created = await CollectionModel.create({
-    name: data.name,
-    category: data.category,
+    name: data.name.trim(),
+    parentId: parentObjectId,
     description: data.description,
     bannerUrl: data.bannerUrl,
-    orderIndex: data.orderIndex ?? 0,
+    orderIndex,
     createdBy: userId,
   });
 
@@ -296,9 +479,32 @@ export async function updateCollection(
     collection.name = newName;
   }
 
-  if (data.category !== undefined) {
-    collection.category = data.category;
+  if (data.parentId !== undefined) {
+    if (!data.parentId) {
+      collection.parentId = null;
+    } else {
+      if (String(collection._id) === String(data.parentId)) {
+        throw new BadRequestError("INVALID_PARENT", "Bộ đề không thể làm cha của chính mình.");
+      }
+
+      // Check if collection currently has children
+      const hasChildren = await CollectionModel.exists({ parentId: collection._id }).exec();
+      if (hasChildren) {
+        throw new BadRequestError("COLLECTION_HAS_CHILDREN", "Bộ đề đang có các bộ con, không thể chuyển thành bộ con của bộ khác.");
+      }
+
+      const targetParent = await CollectionModel.findById(data.parentId).exec();
+      if (!targetParent) {
+        throw new NotFoundError("Không tìm thấy bộ đề cha.");
+      }
+      if (targetParent.parentId) {
+        throw new BadRequestError("INVALID_PARENT", "Hệ thống chỉ hỗ trợ tối đa 2 cấp bộ đề (Gốc -> Bộ con).");
+      }
+
+      collection.parentId = targetParent._id;
+    }
   }
+
   if (data.description !== undefined) {
     collection.description = data.description ?? undefined;
   }
@@ -323,7 +529,13 @@ export async function deleteCollection(
     throw new NotFoundError("Không tìm thấy nhóm bộ đề.");
   }
 
-  // Unlink associated exams (keep exams safe in library)
+  // Rule 6: Promote children to root if this collection has children
+  await CollectionModel.updateMany(
+    { parentId: collection._id },
+    { $set: { parentId: null } }
+  ).exec();
+
+  // Unlink associated exams of this collection
   await ExamModel.updateMany(
     { "curriculum.collectionName": collection.name },
     { $set: { "curriculum.collectionName": null } }
@@ -343,6 +555,12 @@ export async function addExamsToCollection(
   const collection = await CollectionModel.findById(collectionId).exec();
   if (!collection) {
     throw new NotFoundError("Không tìm thấy nhóm bộ đề.");
+  }
+
+  // Rule 3: Do not add exams directly to parent if parent already has children
+  const hasChildren = await CollectionModel.exists({ parentId: collection._id }).exec();
+  if (hasChildren) {
+    throw new ConflictError("COLLECTION_HAS_CHILDREN", "Bộ đề này đã có các bộ đề con. Vui lòng thêm đề thi vào từng bộ đề con.");
   }
 
   interface ExamItemConfig {
@@ -455,4 +673,42 @@ export async function updateExamInCollection(
   }
 
   return { examId, message: "Đã cập nhật vị trí bài thi trong nhóm bộ đề." };
+}
+
+export async function reorderExamsInCollection(
+  collectionId: string,
+  body: ReorderExamsInCollectionBody,
+  _userId: string,
+  _role: string
+): Promise<{ count: number; message: string }> {
+  const collection = await CollectionModel.findById(collectionId).exec();
+  if (!collection) {
+    throw new NotFoundError("Không tìm thấy nhóm bộ đề.");
+  }
+
+  if (body.items.length === 0) {
+    return { count: 0, message: "Không có đề thi nào để cập nhật." };
+  }
+
+  const bulkOps = body.items.map((item) => ({
+    updateOne: {
+      filter: {
+        _id: item.examId,
+        "curriculum.collectionName": collection.name,
+      },
+      update: {
+        $set: {
+          "curriculum.testNumber": item.testNumber,
+          "curriculum.orderIndex": item.orderIndex,
+        },
+      },
+    },
+  }));
+
+  const result = await ExamModel.bulkWrite(bulkOps);
+
+  return {
+    count: result.modifiedCount,
+    message: `Đã cập nhật thứ tự cho ${result.modifiedCount} đề thi.`,
+  };
 }

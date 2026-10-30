@@ -6,6 +6,7 @@ import type {
   AddExamsToCollectionBody,
   CreateCollectionBody,
   ListCollectionsQuery,
+  ReorderExamsInCollectionBody,
   UpdateCollectionBody,
   UpdateExamInCollectionBody,
 } from "./collection.validation.js";
@@ -23,9 +24,15 @@ function requireUser(req: Request): NonNullable<Request["user"]> {
 export async function listCollections(req: Request, res: Response): Promise<void> {
   const user = requireUser(req);
   const query = req.query as unknown as ListCollectionsQuery;
-  const { collections, allCategories, page, limit, total, totalPages } =
+  const { collections, page, limit, total, totalPages } =
     await collectionService.listCollections(user.id, user.role, query);
-  sendSuccess(res, collections, 200, { page, limit, total, totalPages, allCategories });
+  sendSuccess(res, collections, 200, { page, limit, total, totalPages });
+}
+
+export async function getCollectionTree(req: Request, res: Response): Promise<void> {
+  requireUser(req);
+  const tree = await collectionService.getCollectionTree();
+  sendSuccess(res, tree);
 }
 
 export async function getCollection(req: Request, res: Response): Promise<void> {
@@ -79,5 +86,13 @@ export async function updateExamInCollection(req: Request, res: Response): Promi
   const examId = req.params.examId as string;
   const body = req.body as UpdateExamInCollectionBody;
   const result = await collectionService.updateExamInCollection(id, examId, body, user.id, user.role);
+  sendSuccess(res, result);
+}
+
+export async function reorderExamsInCollection(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req);
+  const id = req.params.id as string;
+  const body = req.body as ReorderExamsInCollectionBody;
+  const result = await collectionService.reorderExamsInCollection(id, body, user.id, user.role);
   sendSuccess(res, result);
 }

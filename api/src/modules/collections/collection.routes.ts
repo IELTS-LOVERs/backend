@@ -10,6 +10,7 @@ import {
   GetCollectionSchema,
   ListCollectionsSchema,
   RemoveExamFromCollectionSchema,
+  ReorderExamsInCollectionSchema,
   UpdateCollectionSchema,
   UpdateExamInCollectionSchema,
 } from "./collection.validation.js";
@@ -21,6 +22,12 @@ router.get(
   authenticate,
   validate(ListCollectionsSchema),
   collectionController.listCollections
+);
+
+router.get(
+  "/tree",
+  authenticate,
+  collectionController.getCollectionTree
 );
 
 router.get(
@@ -54,6 +61,13 @@ router.post(
   "/:id/exams",
   validate(AddExamsToCollectionSchema),
   collectionController.addExamsToCollection
+);
+
+// IMPORTANT: /reorder must be mounted BEFORE /:id/exams/:examId
+router.patch(
+  "/:id/exams/reorder",
+  validate(ReorderExamsInCollectionSchema),
+  collectionController.reorderExamsInCollection
 );
 
 router.delete(

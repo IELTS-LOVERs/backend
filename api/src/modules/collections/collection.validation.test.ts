@@ -3,13 +3,14 @@ import {
   AddExamsToCollectionSchema,
   CreateCollectionSchema,
   ListCollectionsSchema,
+  ReorderExamsInCollectionSchema,
   UpdateCollectionSchema,
   UpdateExamInCollectionSchema,
 } from "./collection.validation.js";
 
 describe("Collection Validation Schemas", () => {
   describe("CreateCollectionSchema", () => {
-    it("validates valid payload with default category", () => {
+    it("validates valid payload with default orderIndex", () => {
       const parsed = CreateCollectionSchema.safeParse({
         body: {
           name: "Cambridge IELTS 19",
@@ -17,21 +18,21 @@ describe("Collection Validation Schemas", () => {
       });
       expect(parsed.success).toBe(true);
       if (parsed.success) {
-        expect(parsed.data.body.category).toBe("Giáo trình trung tâm");
+        expect(parsed.data.body.name).toBe("Cambridge IELTS 19");
         expect(parsed.data.body.orderIndex).toBe(0);
       }
     });
 
-    it("accepts custom category string", () => {
+    it("accepts parentId string or null", () => {
       const parsed = CreateCollectionSchema.safeParse({
         body: {
           name: "Cambridge IELTS 19",
-          category: "Forecast 2026",
+          parentId: "66e85d1c262f3b9200000001",
         },
       });
       expect(parsed.success).toBe(true);
       if (parsed.success) {
-        expect(parsed.data.body.category).toBe("Forecast 2026");
+        expect(parsed.data.body.parentId).toBe("66e85d1c262f3b9200000001");
       }
     });
 
@@ -46,15 +47,19 @@ describe("Collection Validation Schemas", () => {
   });
 
   describe("UpdateCollectionSchema", () => {
-    it("accepts valid partial updates", () => {
+    it("accepts valid partial updates including parentId", () => {
       const parsed = UpdateCollectionSchema.safeParse({
         params: { id: "col123" },
         body: {
           name: "Cambridge IELTS 19 Updated",
-          category: "cambridge",
+          parentId: null,
+          orderIndex: 2,
         },
       });
       expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.body.parentId).toBeNull();
+      }
     });
   });
 
@@ -64,14 +69,14 @@ describe("Collection Validation Schemas", () => {
         query: {
           page: "2",
           limit: "25",
-          category: "vol",
+          parentId: "col123",
         },
       });
       expect(parsed.success).toBe(true);
       if (parsed.success) {
         expect(parsed.data.query.page).toBe(2);
         expect(parsed.data.query.limit).toBe(25);
-        expect(parsed.data.query.category).toBe("vol");
+        expect(parsed.data.query.parentId).toBe("col123");
       }
     });
   });
@@ -111,6 +116,21 @@ describe("Collection Validation Schemas", () => {
           testNumber: 2,
           part: 3,
           orderIndex: 1,
+        },
+      });
+      expect(parsed.success).toBe(true);
+    });
+  });
+
+  describe("ReorderExamsInCollectionSchema", () => {
+    it("accepts items array for reordering", () => {
+      const parsed = ReorderExamsInCollectionSchema.safeParse({
+        params: { id: "col123" },
+        body: {
+          items: [
+            { examId: "exam1", testNumber: 1, orderIndex: 0 },
+            { examId: "exam2", testNumber: 1, orderIndex: 1 },
+          ],
         },
       });
       expect(parsed.success).toBe(true);
