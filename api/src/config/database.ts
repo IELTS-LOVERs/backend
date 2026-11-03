@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { logger } from "../common/utils/logger.js";
 import { env } from "./env.js";
 
 export async function connectDB(): Promise<void> {
@@ -6,9 +7,9 @@ export async function connectDB(): Promise<void> {
 
   try {
     await mongoose.connect(env.MONGODB_URI);
-    console.log("[database] Connected to MongoDB");
+    logger.info("database.connected");
   } catch (error) {
-    console.error("[database] MongoDB connection error:", error);
+    logger.error("database.connection_failed", { error });
     throw error;
   }
 }

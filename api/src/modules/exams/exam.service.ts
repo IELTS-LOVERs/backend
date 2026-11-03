@@ -1,3 +1,7 @@
+import { countExamPoints } from "../../common/utils/exam-points.util.js";
+import { extractMediaId } from "../../common/utils/media.util.js";
+import { escapeRegExp } from "../../common/utils/escape-regexp.js";
+import { assertOwnership } from "../../common/utils/ownership.util.js";
 import mongoose, { type Types } from "mongoose";
 import {
   BadRequestError,
@@ -270,9 +274,6 @@ export function compareExamTitles(a: string, b: string): number {
 }
 
 /** Escape user input before passing it to `new RegExp` (prevents 500/ReDoS). */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /**
  * Filter for a book group / curriculum collection.
@@ -336,14 +337,6 @@ function toSafeObjectId(id: unknown): Types.ObjectId | undefined {
 }
 
 /** Extract an ObjectId string from a raw ObjectId, a populated Media doc, or null. */
-function extractMediaId(item: unknown): string {
-  if (item === null || item === undefined) return "";
-  if (typeof item === "object" && "_id" in item) {
-    const id = (item as { _id?: unknown })._id;
-    return id ? String(id) : "";
-  }
-  return String(item);
-}
 
 function mapQuestionItemInput(item: QuestionItemInput): Partial<IQuestionItem> {
   const safeId = toSafeObjectId(item._id);
@@ -502,17 +495,6 @@ function serializeQuestionGroup(
   };
 }
 
-export function assertOwnership(
-  exam: Pick<IExam, "createdBy">,
-  userId: string,
-  role: string
-): void {
-  if (role === "admin") return;
-
-  if (exam.createdBy?.toString() !== userId) {
-    throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
-  }
-}
 
 async function findOwnedExam(id: string, userId: string, role: string): Promise<IExam> {
   const exam = await ExamModel.findById(id);
@@ -1341,17 +1323,6 @@ export function countExamQuestions(exam: Pick<IExam, "sections">): number {
 }
 
 /** Count total points across all questions (including weights). */
-export function countExamPoints(exam: Pick<IExam, "sections">): number {
-  let count = 0;
-  for (const section of exam.sections ?? []) {
-    for (const group of section.questionGroups ?? []) {
-      for (const question of group.questions ?? []) {
-        count += question.points ?? 1;
-      }
-    }
-  }
-  return count;
-}
 
 export function validateExamReadyForPublish(exam: IExam): void {
   // Heal legacy drafts on publish: numbering is part of the candidate contract.
@@ -1534,3 +1505,5 @@ export async function close(
 
   return { id: exam._id.toString(), status: exam.status };
 }
+
+export { assertOwnership, countExamPoints };

@@ -1,3 +1,4 @@
+import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel } from "../exams/exam.model.js";
@@ -14,9 +15,6 @@ import type {
   UpdateExamInCollectionBody,
 } from "./collection.validation.js";
 
-function escapeRegex(text: string): string {
-  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
-}
 
 export interface CollectionWithStats {
   _id: string;
@@ -99,7 +97,7 @@ export async function listCollections(
   const filter: Record<string, unknown> = {};
 
   if (query.search) {
-    filter.name = { $regex: new RegExp(escapeRegex(query.search), "i") };
+    filter.name = { $regex: new RegExp(escapeRegExp(query.search), "i") };
   }
   if (query.parentId !== undefined) {
     if (query.parentId === "null" || query.parentId === "") {
@@ -405,7 +403,7 @@ export async function createCollection(
   userId: string
 ): Promise<ICollection> {
   const existing = await CollectionModel.findOne({
-    name: { $regex: new RegExp(`^${escapeRegex(data.name.trim())}$`, "i") },
+    name: { $regex: new RegExp(`^${escapeRegExp(data.name.trim())}$`, "i") },
   }).exec();
 
   if (existing) {
@@ -460,7 +458,7 @@ export async function updateCollection(
   if (data.name && data.name.trim().toLowerCase() !== collection.name.toLowerCase()) {
     const existing = await CollectionModel.findOne({
       _id: { $ne: collection._id },
-      name: { $regex: new RegExp(`^${escapeRegex(data.name.trim())}$`, "i") },
+      name: { $regex: new RegExp(`^${escapeRegExp(data.name.trim())}$`, "i") },
     }).exec();
 
     if (existing) {

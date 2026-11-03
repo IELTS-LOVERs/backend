@@ -1,3 +1,4 @@
+import { extractMediaId } from "../../common/utils/media.util.js";
 import crypto from "crypto";
 import mongoose, { type Types } from "mongoose";
 import { EXAM_GRACE_PERIOD_SECONDS } from "../../config/constants.js";
@@ -372,12 +373,6 @@ export async function presignMediaMap(
   return urlMap;
 }
 
-function extractMediaId(item: unknown): string {
-  if (typeof item === "object" && item !== null && "_id" in item) {
-    return (item as { _id: Types.ObjectId | string })._id.toString();
-  }
-  return String(item);
-}
 
 export function computeRemainingSeconds(
   expiresAt: Date,
