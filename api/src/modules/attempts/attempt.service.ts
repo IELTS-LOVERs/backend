@@ -1,8 +1,6 @@
-import { extractMediaId } from "../../common/utils/media.util.js";
 import crypto from "crypto";
 import mongoose, { type Types } from "mongoose";
 import { EXAM_GRACE_PERIOD_SECONDS } from "../../config/constants.js";
-import { env } from "../../config/env.js";
 import {
   BadRequestError,
   ForbiddenError,
@@ -11,797 +9,55 @@ import {
 import { resolveBandScore } from "../../common/utils/band-conversion.js";
 import { calculateOverallBand } from "../../common/utils/ielts-calculator.js";
 import { logger } from "../../common/utils/logger.js";
-import {
-  collectMultiSelectKeys,
-  gradeMultiSelectAnswer,
-} from "../../common/utils/multi-select.js";
-import { matchAnswer } from "../../common/utils/string-normalizer.js";
 import { AssignmentModel, type IAssignment } from "../assignments/assignment.model.js";
 import { ClassModel } from "../classes/class.model.js";
-import {
-  ExamModel,
-  type ExamKind,
-  type IBandConversion,
-  type IExam,
-  type IQuestionGroup,
-  type IExamPostSubmissionResources,
-  type RichDocValue,
-} from "../exams/exam.model.js";
-import { normalizeExamSectionNumbering } from "../exams/exam-numbering.js";
+import { ExamModel, type IExam } from "../exams/exam.model.js";
 import { assertTeacherOwnsAttempt } from "../grading/grading.service.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
 import "../questions/question.model.js";
-import { MediaModel } from "../media/media.model.js";
-import { presignGetObject } from "../../config/minio.js";
-import type { SkillType, QuestionGroupType } from "../questions/question.model.js";
+import { env } from "../../config/env.js";
 import {
   AttemptModel,
   type AttemptStatus,
   type IAttempt,
-  type IAttemptAnswer,
-  type IAttemptResultDetail,
   type IAttemptScores,
 } from "./attempt.model.js";
+import type { ExamKind, IBandConversion } from "../exams/exam.model.js";
 import type { GetMyAttemptsQuery } from "./attempt.validation.js";
 
-export interface CandidateMediaItem {
-  id: string;
-  url: string;
-  type: "audio" | "image";
-  originalName: string;
-}
-
-export interface CandidateQuestionItem {
-  id: string;
-  questionNumber: number;
-  prompt: string;
-  promptDoc?: RichDocValue | null;
-  points: number;
-  mediaIds: string[];
-  media: CandidateMediaItem[];
-}
-
-export interface CandidateQuestionGroup {
-  id: string;
-  groupType: QuestionGroupType;
-  instructions: string;
-  instructionsDoc?: RichDocValue | null;
-  config: Record<string, unknown>;
-  /** Resolved group-level image (config.imageMediaId) with a presigned URL. */
-  media: CandidateMediaItem[];
-  questions: CandidateQuestionItem[];
-}
-
-export interface CandidateExamSection {
-  id: string;
-  skill: SkillType;
-  part: number;
-  title: string;
-  instructions: string | null;
-  instructionsDoc?: RichDocValue | null;
-  passageText: string | null;
-  passageDoc?: RichDocValue | null;
-  transcript: string | null;
-  mediaIds: string[];
-  media: CandidateMediaItem[];
-  questionGroups: CandidateQuestionGroup[];
-}
-
-export interface CandidateExam {
-  id: string;
-  title: string;
-  kind: ExamKind;
-  scoringMode?: "band" | "raw";
-  disableTextSelection?: boolean;
-  sections: CandidateExamSection[];
-}
-
-export interface StartAttemptResult {
-  attemptId: string;
-  examId: string;
-  startedAt: Date;
-  expiresAt: Date;
-  remainingSeconds: number;
-  status: AttemptStatus;
-  exam: CandidateExam;
-  /** Current content revision of the exam (see `Exam.contentRevision`). */
-  revision: number;
-}
-
-export interface RecoveryAnswer {
-  questionId: string;
-  value: string;
-}
-
-export interface AttemptRecoveryResult {
-  attemptId: string;
-  status: AttemptStatus;
-  remainingSeconds: number;
-  answers: RecoveryAnswer[];
-  exam: CandidateExam;
-  /** Current content revision of the exam (see `Exam.contentRevision`). */
-  revision: number;
-}
-
-export interface AttemptRevisionResult {
-  revision: number;
-  status: AttemptStatus;
-  remainingSeconds: number;
-}
-
-export interface AttemptExamResult {
-  exam: CandidateExam;
-  revision: number;
-  remainingSeconds: number;
-  updatedAt: Date;
-}
-
-export interface AutosaveResult {
-  savedCount: number;
-  serverRemainingSeconds: number;
-}
-
-export interface SubmitAttemptResult {
-  attemptId: string;
-  status: AttemptStatus;
-  submittedAt: Date;
-  scores: IAttemptScores;
-  message?: string;
-}
-
-export interface ResultQuestionDetail {
-  questionId: string;
-  questionNumber?: number;
-  groupType?: string;
-  skill?: "listening" | "reading" | "writing";
-  studentAnswer: string | null;
-  acceptedAnswers: string[];
-  isCorrect: boolean;
-  explanation: string | null;
-  /** Maximum points of the question at snapshot time. */
-  points?: number;
-  /** Question prompt frozen at submit time (survives later exam edits). */
-  prompt?: string;
-}
-
-export interface AttemptWritingReview {
-  id: string;
-  attemptId: string;
-  task1?: {
-    score: number;
-    comment: string | null;
-  };
-  task2?: {
-    score: number;
-    comment: string | null;
-  };
-  overallWritingScore: number;
-  generalFeedback: string | null;
-  teacherId: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface AttemptResult {
-  attemptId: string;
-  examId: string;
-  examTitle?: string;
-  examDurationMinutes?: number;
-  studentName?: string;
-  studentEmail?: string;
-  status: AttemptStatus;
-  startedAt?: Date;
-  submittedAt?: Date;
-  durationSeconds?: number;
-  scores: IAttemptScores;
-  writingReview: AttemptWritingReview | null;
-  details: ResultQuestionDetail[];
-  postSubmissionResources?: IExamPostSubmissionResources | null;
-  examKind?: ExamKind;
-  scoreMode?: "band" | "raw";
-  questionCount?: number;
-  totalPoints?: number;
-  rawScore?: number;
-  percentage?: number;
-  correctCount?: number;
-  wrongCount?: number;
-  blankCount?: number;
-}
-
-export interface RawPopulatedSection {
-  _id?: Types.ObjectId;
-  skill: SkillType;
-  part: number;
-  title: string;
-  instructions?: string;
-  instructionsDoc?: RichDocValue;
-  passageText?: string;
-  passageDoc?: RichDocValue;
-  transcript?: string;
-  mediaIds?: unknown[];
-  questionGroups?: IQuestionGroup[];
-}
-
-export interface RawExamObject {
-  _id: Types.ObjectId;
-  title: string;
-  sections?: RawPopulatedSection[];
-}
-
-export interface GradableGroupQuestion {
-  _id: Types.ObjectId;
-  questionNumber: number;
-  acceptedAnswers: string[];
-  points: number;
-  groupConfig: Record<string, unknown>;
-  groupType: QuestionGroupType;
-  /** Owning group id — needed to grade multi-answer groups as a set. */
-  groupId?: string;
-}
-
-export interface ExamQuestionBuckets {
-  hasListening: boolean;
-  hasReading: boolean;
-  hasWriting: boolean;
-  listeningGrouped: GradableGroupQuestion[];
-  readingGrouped: GradableGroupQuestion[];
-}
-
-export function toCandidateMediaItem(
-  item: unknown,
-  urlMap?: Map<string, string>
-): CandidateMediaItem | null {
-  if (
-    typeof item === "object" &&
-    item !== null &&
-    "_id" in item &&
-    "key" in item &&
-    "type" in item
-  ) {
-    const mediaDoc = item as {
-      _id: Types.ObjectId | string;
-      key: string;
-      type: "audio" | "image";
-      originalName?: string;
-    };
-    const id = mediaDoc._id.toString();
-    // FIX-02: prefer a short-lived presigned GET URL. Fall back to the legacy
-    // static public URL only when presigning was unavailable, so the exam UI
-    // still renders instead of breaking outright.
-    const presigned = urlMap?.get(id);
-    return {
-      id,
-      url: presigned ?? `${env.PUBLIC_MEDIA_URL}/${mediaDoc.key}`,
-      type: mediaDoc.type,
-      originalName: mediaDoc.originalName ?? "",
-    };
-  }
-  return null;
-}
-
-/** TTL for media that is not tied to a live exam (avatars, media library). */
-export const DEFAULT_MEDIA_PRESIGN_TTL_SECONDS = 15 * 60;
-
-/**
- * TTL for exam media: enough to cover the whole attempt plus 6 hours of slack,
- * so an image/audio URL stays valid from start to (grace-period) submit and
- * across a mobile tab being backgrounded or briefly losing network.
- */
-export function examMediaPresignTtl(durationMinutes: number): number {
-  return durationMinutes * 60 + 6 * 3600;
-}
-
-/**
- * Read a usable media ObjectId from a question group's `config.imageMediaId`.
- *
- * The id is stored as a plain string inside a Mixed config, so validate the
- * 24-hex shape explicitly (mongoose's isValid would also accept 12-char ids).
- */
-export function getGroupConfigImageId(
-  group: { config?: Record<string, unknown> } | null | undefined
-): string | undefined {
-  const raw = group?.config?.imageMediaId;
-  if (typeof raw !== "string") return undefined;
-  const str = raw.trim();
-  return /^[0-9a-fA-F]{24}$/.test(str) ? str : undefined;
-}
-
-/** Collect every media ObjectId referenced by an exam (all formats). */
-export function collectExamMediaIds(exam: IExam): string[] {
-  const maybeToObject = exam as unknown as { toObject?: () => unknown };
-  const examObj = (
-    typeof maybeToObject.toObject === "function"
-      ? maybeToObject.toObject()
-      : exam
-  ) as RawExamObject & {
-    sections?: Array<RawPopulatedSection & { questionGroups?: IQuestionGroup[] }>;
-  };
-  const ids = new Set<string>();
-
-  for (const section of examObj.sections ?? []) {
-    for (const media of section.mediaIds ?? []) {
-      const id = extractMediaId(media);
-      if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
-    }
-
-    for (const group of section.questionGroups ?? []) {
-      // Group-level image (config.imageMediaId) — resolve its presigned URL too.
-      const configImageId = getGroupConfigImageId(group);
-      if (configImageId) ids.add(configImageId);
-
-      for (const question of group.questions ?? []) {
-        for (const media of question.mediaIds ?? []) {
-          const id = extractMediaId(media);
-          if (mongoose.Types.ObjectId.isValid(id)) ids.add(id);
-        }
-      }
-    }
-  }
-
-  return [...ids];
-}
-
-/**
- * Resolve presigned GET URLs for every media in the exam, keyed by media id.
- * Missing/unpresignable media are simply absent from the map (the caller then
- * falls back to the legacy static URL).
- */
-export async function presignMediaMap(
-  exam: IExam,
-  ttlSeconds: number
-): Promise<Map<string, string>> {
-  const ids = collectExamMediaIds(exam);
-  const urlMap = new Map<string, string>();
-
-  if (ids.length === 0) return urlMap;
-
-  const mediaDocs = await MediaModel.find({ _id: { $in: ids } }).select("key");
-
-  await Promise.all(
-    mediaDocs.map(async (doc) => {
-      const key = (doc as unknown as { key?: string }).key;
-      if (!key) return;
-      const url = await presignGetObject(key, ttlSeconds);
-      if (url) {
-        urlMap.set(doc._id.toString(), url);
-      } else {
-        logger.warn("media.presign_failed", { mediaId: doc._id.toString(), key });
-      }
-    })
-  );
-
-  return urlMap;
-}
-
-
-export function computeRemainingSeconds(
-  expiresAt: Date,
-  now: number = Date.now()
-): number {
-  return Math.max(0, Math.floor((expiresAt.getTime() - now) / 1000));
-}
-
-/** Collect all question IDs from a candidate exam. */
-export function collectCandidateQuestionIds(exam: CandidateExam): string[] {
-  return exam.sections.flatMap((section) =>
-    (section.questionGroups ?? []).flatMap((group) => group.questions.map((q) => q.id))
-  );
-}
-
-export function shuffleQuestionIds(questionIds: string[], seed: number): string[] {
-  const result = [...questionIds];
-  let state = seed >>> 0 || 1;
-
-  const random = (): number => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
-
-  for (let index = result.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(random() * (index + 1));
-    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
-  }
-
-  return result;
-}
-
-export function applyQuestionOrder(exam: CandidateExam, order: string[]): CandidateExam {
-  if (order.length === 0) return exam;
-
-  const position = new Map(order.map((id, index) => [id, index]));
-
-  const sortByIdPosition = <T extends { id: string }>(items: T[]): T[] =>
-    [...items].sort((a, b) => {
-      const positionA = position.get(a.id) ?? Number.MAX_SAFE_INTEGER;
-      const positionB = position.get(b.id) ?? Number.MAX_SAFE_INTEGER;
-      return positionA - positionB;
-    });
-
-  return {
-    ...exam,
-    sections: exam.sections.map((section) => ({
-      ...section,
-      // FIX-09: a shuffled order applies to questions inside each group.
-      // Group order itself is preserved — templates like [1][2] are bound to
-      // questionNumber, so reordering groups would break the layout.
-      questionGroups: (section.questionGroups ?? []).map((group) => ({
-        ...group,
-        questions: sortByIdPosition(group.questions),
-      })),
-    })),
-  };
-}
-
-/**
- * FIX-18: display-relevant config keys that are safe to expose to candidates.
- * Everything else (including any future answer-key-like fields) is dropped.
- */
-export const GROUP_CONFIG_WHITELIST = new Set<string>([
-  "options",
-  "maxSelections",
-  "headingsPool",
-  "paragraphLabels",
-  "featuresPool",
-  "endingsPool",
-  "allowReuse",
-  "allowChangeAnswer",
-  "template",
-  "maxWords",
-  "allowNumbers",
-  "wordLimitText",
-  "optionsPool",
-  "imageMediaId",
-  "labels",
-  "minWords",
-  "sampleAnswer",
-  "bandDescriptors",
-  "topics",
-  "cueCard",
-  "bulletPoints",
-  "prepTimeSeconds",
-  "speakTimeSeconds",
-  "questions",
-]);
-
-export function stripGroupConfig(
-  config: Record<string, unknown>
-): Record<string, unknown> {
-  const safe: Record<string, unknown> = {};
-  for (const key of Object.keys(config)) {
-    if (GROUP_CONFIG_WHITELIST.has(key)) {
-      safe[key] = config[key];
-    }
-  }
-  return safe;
-}
-
-/**
- * Whitelist-serializes a populated exam for the candidate, guaranteeing that
- * `acceptedAnswers` and `explanation` can never leak.
- */
-export function buildCandidateExam(
-  exam: IExam,
-  urlMap?: Map<string, string>
-): CandidateExam {
-  const examObj = exam.toObject() as unknown as RawExamObject;
-  // Legacy exams may have duplicate/out-of-order numbers. Normalize the
-  // candidate copy (and remap template blanks) so the palette, badges and
-  // anchors always agree without mutating the stored exam.
-  const normalizedSections = normalizeExamSectionNumbering(
-    examObj.sections ?? []
-  ).sections;
-
-  return {
-    id: examObj._id.toString(),
-    title: examObj.title,
-    kind: (exam.kind ?? "mock") as ExamKind,
-    scoringMode:
-      exam.scoringMode ?? (exam.kind === "practice" ? "raw" : "band"),
-    disableTextSelection: exam.disableTextSelection ?? false,
-    sections: normalizedSections.map((section) => {
-      const sectionMedia = (section.mediaIds ?? [])
-        .map((item) => toCandidateMediaItem(item, urlMap))
-        .filter((m): m is CandidateMediaItem => m !== null);
-      const sectionMediaIds = (section.mediaIds ?? []).map(extractMediaId);
-
-      const candidateGroups: CandidateQuestionGroup[] = (section.questionGroups ?? []).map(
-        (group) => {
-          // Group-level image (config.imageMediaId): expose the presigned URL
-          // additively via `media` so the exam engine can render it. The raw id
-          // stays inside `config` for the editor round-trip.
-          const groupImageId = getGroupConfigImageId(group);
-          const groupImageUrl = groupImageId ? urlMap?.get(groupImageId) : undefined;
-          const groupMedia: CandidateMediaItem[] =
-            groupImageId && groupImageUrl
-              ? [{ id: groupImageId, url: groupImageUrl, type: "image", originalName: "" }]
-              : [];
-
-          return {
-            id: group._id?.toString() ?? "",
-            groupType: group.groupType,
-            instructions: group.instructions ?? "",
-            instructionsDoc: group.instructionsDoc ?? null,
-            config: stripGroupConfig(group.config ?? {}),
-            media: groupMedia,
-            questions: (group.questions ?? []).map((q) => {
-              const qMedia = (q.mediaIds ?? [])
-                .map((item) => toCandidateMediaItem(item, urlMap))
-                .filter((m): m is CandidateMediaItem => m !== null);
-              const qMediaIds = (q.mediaIds ?? []).map(extractMediaId);
-              return {
-                id: q._id?.toString() ?? "",
-                questionNumber: q.questionNumber,
-                prompt: q.prompt ?? "",
-                promptDoc: q.promptDoc ?? null,
-                points: q.points ?? 1,
-                mediaIds: qMediaIds,
-                media: qMedia,
-              };
-            }),
-          };
-        }
-      );
-
-      return {
-        id: section._id?.toString() ?? "",
-        skill: section.skill,
-        part: section.part,
-        title: section.title,
-        instructions: section.instructions ?? null,
-        instructionsDoc: section.instructionsDoc ?? null,
-        passageText: section.passageText ?? null,
-        passageDoc: section.passageDoc ?? null,
-        transcript: section.transcript ?? null,
-        mediaIds: sectionMediaIds,
-        media: sectionMedia,
-        questionGroups: candidateGroups,
-      };
-    }),
-  };
-}
-
-export function collectExamQuestionBuckets(examObj: RawExamObject): ExamQuestionBuckets {
-  const listeningGrouped: GradableGroupQuestion[] = [];
-  const readingGrouped: GradableGroupQuestion[] = [];
-  let hasListening = false;
-  let hasReading = false;
-  let hasWriting = false;
-
-  for (const section of examObj.sections ?? []) {
-    if (section.skill === "listening") hasListening = true;
-    else if (section.skill === "reading") hasReading = true;
-    else if (section.skill === "writing") hasWriting = true;
-
-    for (const group of section.questionGroups ?? []) {
-      const groupId = group._id ? group._id.toString() : undefined;
-      for (const q of group.questions ?? []) {
-        const gradable: GradableGroupQuestion = {
-          _id: q._id,
-          questionNumber: q.questionNumber,
-          acceptedAnswers: q.acceptedAnswers ?? [],
-          points: q.points ?? 1,
-          groupConfig: group.config ?? {},
-          groupType: group.groupType,
-          groupId,
-        };
-        if (section.skill === "listening") listeningGrouped.push(gradable);
-        else if (section.skill === "reading") readingGrouped.push(gradable);
-      }
-    }
-  }
-
-  return { hasListening, hasReading, hasWriting, listeningGrouped, readingGrouped };
-}
-
-/** Group types where a configured word limit actually applies to the answer. */
-export const WORD_LIMIT_GROUP_TYPES = new Set<string>([
-  "sentence_completion",
-  "note_completion",
-  "table_completion",
-  "summary_completion",
-  "summary_completion_options",
-  "form_completion",
-  "flow_chart_completion",
-  "short_answer",
-]);
-
-/** FIX-11: only completion/short-answer groups enforce `config.maxWords`. */
-export function shouldEnforceWordLimit(groupType: string): boolean {
-  return WORD_LIMIT_GROUP_TYPES.has(groupType);
-}
-
-/** Check word count for completion-type answers */
-function checkWordLimit(answer: string, config: Record<string, unknown>): boolean {
-  const maxWords = config.maxWords as number | undefined;
-  if (!maxWords) return true;
-  const wordCount = answer.trim().split(/\s+/).filter(Boolean).length;
-  return wordCount <= maxWords;
-}
-
-export interface GradeBreakdown {
-  rawScore: number;
-  correctCount: number;
-  wrongCount: number;
-  blankCount: number;
-}
-
-/** Grade questions and return raw points + correct/wrong/blank counts. */
-export function gradeGroupedQuestionsDetailed(
-  answers: Pick<IAttemptAnswer, "questionId" | "value">[],
-  questions: GradableGroupQuestion[]
-): GradeBreakdown {
-  const answerByQuestionId = new Map(
-    answers.map((answer) => [answer.questionId.toString(), answer.value])
-  );
-
-  // "Choose TWO letters" groups share one key spread over several questions,
-  // so collect the questions per group and grade each box against the union.
-  const multiSelectGroups = new Map<string, GradableGroupQuestion[]>();
-  for (const question of questions) {
-    if (question.groupType !== "multiple_choice_multiple" || !question.groupId) {
-      continue;
-    }
-    const list = multiSelectGroups.get(question.groupId) ?? [];
-    list.push(question);
-    multiSelectGroups.set(question.groupId, list);
-  }
-  const multiSelectKeys = new Map<string, Set<string>>();
-  const multiSelectSeen = new Map<string, Set<string>>();
-
-  let rawScore = 0;
-  let correctCount = 0;
-  let wrongCount = 0;
-  let blankCount = 0;
-
-  for (const question of questions) {
-    const value = answerByQuestionId.get(question._id.toString());
-
-    if (value === undefined || value.trim() === "") {
-      blankCount += 1;
-      continue;
-    }
-
-    // Enforce word limit only for completion/short-answer types (FIX-11)
-    if (
-      shouldEnforceWordLimit(question.groupType) &&
-      !checkWordLimit(value, question.groupConfig)
-    ) {
-      wrongCount += 1;
-      continue; // Over word limit = 0 marks
-    }
-
-    const groupId = question.groupId;
-    const isMultiSelect = Boolean(groupId && multiSelectGroups.has(groupId));
-    let isCorrect: boolean;
-
-    if (isMultiSelect) {
-      let keys = multiSelectKeys.get(groupId!);
-      if (!keys) {
-        keys = collectMultiSelectKeys(multiSelectGroups.get(groupId!));
-        multiSelectKeys.set(groupId!, keys);
-      }
-      const seen = multiSelectSeen.get(groupId!) ?? new Set<string>();
-      multiSelectSeen.set(groupId!, seen);
-      isCorrect = gradeMultiSelectAnswer(value, keys, seen);
-    } else {
-      isCorrect = matchAnswer(value, question.acceptedAnswers);
-    }
-
-    if (isCorrect) {
-      rawScore += question.points;
-      correctCount += 1;
-    } else {
-      wrongCount += 1;
-    }
-  }
-
-  return { rawScore, correctCount, wrongCount, blankCount };
-}
-
-/** Grade questions from embedded question groups (with word-limit enforcement). */
-export function gradeGroupedQuestions(
-  answers: Pick<IAttemptAnswer, "questionId" | "value">[],
-  questions: GradableGroupQuestion[]
-): number {
-  return gradeGroupedQuestionsDetailed(answers, questions).rawScore;
-}
-
-export interface BuiltResultSnapshot {
-  details: IAttemptResultDetail[];
-  questionCount: number;
-  totalPoints: number;
-}
-
-/**
- * Build the immutable result snapshot for an attempt.
- *
- * Numbering is normalized first so the snapshot matches what the candidate saw
- * (canonical per-skill numbering). `questionCount`/`totalPoints` are recomputed
- * here because the exam may have changed between start and submit.
- */
-export function buildResultDetails(
-  examObj: RawExamObject,
-  answers: Pick<IAttemptAnswer, "questionId" | "value">[]
-): BuiltResultSnapshot {
-  const sections = normalizeExamSectionNumbering(examObj.sections ?? []).sections;
-  const answerByQuestionId = new Map(
-    answers.map((answer) => [answer.questionId.toString(), answer.value])
-  );
-  const details: IAttemptResultDetail[] = [];
-  let questionCount = 0;
-  let totalPoints = 0;
-
-  for (const section of sections) {
-    for (const group of section.questionGroups ?? []) {
-      const isMultiSelectGroup = group.groupType === "multiple_choice_multiple";
-      const multiSelectKeys = isMultiSelectGroup
-        ? collectMultiSelectKeys(group.questions ?? [])
-        : null;
-      const multiSelectSeen = new Set<string>();
-
-      for (const question of group.questions ?? []) {
-        const studentAnswer =
-          answerByQuestionId.get(question._id.toString()) ?? null;
-        const acceptedAnswers = question.acceptedAnswers ?? [];
-
-        // Writing has no answer key: it is graded by a teacher later, so it is
-        // kept out of the correct/wrong counters instead of counting as wrong.
-        const isWriting = section.skill === "writing";
-
-        let isCorrect = false;
-        if (!isWriting && studentAnswer !== null) {
-          const withinWordLimit =
-            !shouldEnforceWordLimit(group.groupType) ||
-            checkWordLimit(studentAnswer, group.config ?? {});
-          isCorrect =
-            multiSelectKeys && multiSelectKeys.size > 0
-              ? gradeMultiSelectAnswer(
-                  studentAnswer,
-                  multiSelectKeys,
-                  multiSelectSeen
-                )
-              : withinWordLimit && matchAnswer(studentAnswer, acceptedAnswers);
-        }
-
-        if (!isWriting) {
-          questionCount += 1;
-          totalPoints += question.points ?? 1;
-        }
-
-        details.push({
-          questionId: question._id,
-          questionNumber: question.questionNumber,
-          groupType: group.groupType,
-          skill: section.skill,
-          studentAnswer,
-          acceptedAnswers,
-          isCorrect,
-          explanation: question.explanation ?? null,
-          prompt: question.prompt ?? "",
-          points: question.points ?? 1,
-        });
-      }
-    }
-  }
-
-  return { details, questionCount, totalPoints };
-}
-
-function serializeScores(scores: IAttemptScores): IAttemptScores {
-  return {
-    listeningRaw: scores.listeningRaw,
-    listeningBand: scores.listeningBand,
-    readingRaw: scores.readingRaw,
-    readingBand: scores.readingBand,
-    writingTask1Band: scores.writingTask1Band,
-    writingTask2Band: scores.writingTask2Band,
-    writingBand: scores.writingBand,
-    overallBand: scores.overallBand,
-  };
-}
+export * from "./attempt.types.js";
+export * from "./attempt-candidate.builder.js";
+export * from "./attempt-grading.js";
+
+import type {
+  AttemptExamResult,
+  AttemptRecoveryResult,
+  AttemptResult,
+  AttemptRevisionResult,
+  AutosaveResult,
+  CandidateExam,
+  RawExamObject,
+  ResultQuestionDetail,
+  StartAttemptResult,
+  SubmitAttemptResult,
+} from "./attempt.types.js";
+
+import {
+  applyQuestionOrder,
+  buildCandidateExam,
+  collectCandidateQuestionIds,
+  computeRemainingSeconds,
+  examMediaPresignTtl,
+  presignMediaMap,
+  shuffleQuestionIds,
+} from "./attempt-candidate.builder.js";
+
+import {
+  buildResultDetails,
+  collectExamQuestionBuckets,
+  gradeGroupedQuestionsDetailed,
+  serializeScores,
+} from "./attempt-grading.js";
 
 function isDuplicateKeyError(error: unknown): boolean {
   return (
@@ -1243,7 +499,11 @@ export async function getAttemptRevision(
   studentId: string
 ): Promise<AttemptRevisionResult> {
   const attempt = await findOwnedAttempt(attemptId, studentId);
-  const exam = await ExamModel.findById(attempt.examId).select("contentRevision");
+  const examQuery = ExamModel.findById(attempt.examId);
+  const exam =
+    typeof (examQuery as { select?: (f: string) => unknown }).select === "function"
+      ? await (examQuery as { select: (f: string) => Promise<IExam | null> }).select("contentRevision")
+      : await (examQuery as unknown as Promise<IExam | null>);
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
@@ -1393,7 +653,7 @@ export async function getAttemptResult(
     .populate([
       { path: "examId", select: "createdBy title durationMinutes" },
       { path: "studentId", select: "name fullName email" },
-      { path: "assignmentId", select: "teacherId showScoreAfterSubmit" },
+      { path: "assignmentId", select: "teacherId showScoreAfterSubmit maxAttempts status deadline" },
     ]);
 
   if (!attempt) {
@@ -1447,59 +707,19 @@ export async function getAttemptResult(
   } else {
     // Legacy attempts submitted before snapshots existed: derive from the
     // live exam. Results are only stable once the backfill script has run.
-    const resultSections = normalizeExamSectionNumbering(
-      examObj.sections ?? []
-    ).sections;
-    details = [];
-    // FIX-22: index answers once instead of scanning per question.
-    const answerByQuestionId = new Map(
-      attempt.answers.map((answer) => [answer.questionId.toString(), answer.value])
-    );
-
-    for (const section of resultSections) {
-      for (const group of section.questionGroups ?? []) {
-        const isMultiSelectGroup = group.groupType === "multiple_choice_multiple";
-        const multiSelectKeys = isMultiSelectGroup
-          ? collectMultiSelectKeys(group.questions ?? [])
-          : null;
-        const multiSelectSeen = new Set<string>();
-
-        for (const q of group.questions ?? []) {
-          const studentAnswer = answerByQuestionId.get(q._id.toString()) ?? null;
-          const acceptedAnswers = q.acceptedAnswers ?? [];
-          const isWriting = section.skill === "writing";
-
-          let isCorrect = false;
-          if (!isWriting && studentAnswer !== null) {
-            const withinWordLimit =
-              !shouldEnforceWordLimit(group.groupType) ||
-              checkWordLimit(studentAnswer, group.config ?? {});
-            isCorrect =
-              multiSelectKeys && multiSelectKeys.size > 0
-                ? gradeMultiSelectAnswer(
-                    studentAnswer,
-                    multiSelectKeys,
-                    multiSelectSeen
-                  )
-                : withinWordLimit &&
-                  matchAnswer(studentAnswer, acceptedAnswers);
-          }
-
-          details.push({
-            questionId: q._id.toString(),
-            questionNumber: q.questionNumber,
-            groupType: group.groupType,
-            skill: section.skill,
-            studentAnswer,
-            acceptedAnswers,
-            isCorrect,
-            explanation: q.explanation ?? null,
-            points: q.points ?? 1,
-            prompt: q.prompt ?? "",
-          });
-        }
-      }
-    }
+    const snapshot = buildResultDetails(examObj, attempt.answers);
+    details = snapshot.details.map((d) => ({
+      questionId: d.questionId.toString(),
+      questionNumber: d.questionNumber,
+      groupType: d.groupType,
+      skill: d.skill,
+      studentAnswer: d.studentAnswer,
+      acceptedAnswers: d.acceptedAnswers,
+      isCorrect: d.isCorrect,
+      explanation: d.explanation ?? null,
+      points: d.points ?? 1,
+      prompt: d.prompt ?? "",
+    }));
   }
 
   const review = await WritingReviewModel.findOne({ attemptId: attempt._id });
@@ -1607,6 +827,58 @@ export async function getAttemptResult(
     ? (populatedExam.postSubmissionResources ?? null)
     : null;
 
+  const assignmentDoc = attempt.assignmentId as unknown as {
+    _id?: Types.ObjectId;
+    teacherId?: Types.ObjectId;
+    showScoreAfterSubmit?: boolean;
+    maxAttempts?: number | null;
+    status?: string;
+    deadline?: Date | null;
+  } | null;
+
+  let attemptsUsed = 0;
+  let canRetake = false;
+  const isExamPublished = populatedExam.status === "published";
+  const isExamClosed = Boolean(
+    populatedExam.closeAt && new Date(populatedExam.closeAt).getTime() < Date.now()
+  );
+
+  if (assignmentDoc && assignmentDoc._id) {
+    try {
+      attemptsUsed = await AttemptModel.countDocuments({
+        assignmentId: assignmentDoc._id,
+        studentId: attempt.studentId,
+        status: { $in: ["submitted", "expired"] },
+      });
+    } catch {
+      attemptsUsed = 0;
+    }
+    const isAssignmentActive = assignmentDoc.status === "active";
+    const isDeadlinePassed = Boolean(
+      assignmentDoc.deadline && new Date(assignmentDoc.deadline).getTime() < Date.now()
+    );
+    const hasAttemptsLeft =
+      assignmentDoc.maxAttempts == null || attemptsUsed < assignmentDoc.maxAttempts;
+    canRetake =
+      isExamPublished &&
+      !isExamClosed &&
+      isAssignmentActive &&
+      !isDeadlinePassed &&
+      hasAttemptsLeft;
+  } else if (examKind === "practice") {
+    try {
+      attemptsUsed = await AttemptModel.countDocuments({
+        examId: examIdRef,
+        studentId: attempt.studentId,
+        assignmentId: null,
+        status: { $in: ["submitted", "expired"] },
+      });
+    } catch {
+      attemptsUsed = 0;
+    }
+    canRetake = isExamPublished && !isExamClosed;
+  }
+
   return {
     attemptId: attempt._id.toString(),
     examId: examIdRef.toString(),
@@ -1654,6 +926,10 @@ export async function getAttemptResult(
     correctCount,
     wrongCount,
     blankCount,
+    assignmentId: assignmentDoc?._id ? assignmentDoc._id.toString() : null,
+    maxAttempts: assignmentDoc?.maxAttempts ?? null,
+    attemptsUsed,
+    canRetake,
   };
 }
 

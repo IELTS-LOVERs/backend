@@ -140,6 +140,7 @@ export async function getTeacherDashboard(
       $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
     }).select("scores.overallBand"),
     AttemptModel.find(attemptFilter)
+      .select("_id studentId examId submittedAt scores.overallBand suspicious")
       .populate("studentId", "fullName email")
       .populate("examId", "title")
       .sort({ submittedAt: -1 })

@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "../../config/env.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { ExamModel, type IExam } from "../exams/exam.model.js";
@@ -56,6 +56,10 @@ function makeGroup(overrides: Record<string, unknown> = {}) {
     ...rest,
   };
 }
+
+beforeEach(() => {
+  vi.spyOn(AttemptModel, "countDocuments").mockResolvedValue(0 as never);
+});
 
 describe("computeRemainingSeconds", () => {
   it("floors the remaining duration in seconds", () => {
@@ -726,6 +730,154 @@ describe("BUG-05 expired attempt result", () => {
       role: "admin",
     });
     expect(adminResult.scores.overallBand).toBe(7);
+  });
+});
+
+describe("getAttemptResult retake status (TODO G5)", () => {
+  const attemptId = new mongoose.Types.ObjectId();
+  const studentOwnerId = new mongoose.Types.ObjectId();
+  const examId = new mongoose.Types.ObjectId();
+  const assignmentId = new mongoose.Types.ObjectId();
+
+  it("calculates attemptsUsed and sets canRetake=true when under maxAttempts and active", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: examId, status: "published", kind: "mock" },
+      assignmentId: {
+        _id: assignmentId,
+        status: "active",
+        maxAttempts: 3,
+        deadline: new Date(Date.now() + 86400000),
+      },
+      answers: [],
+      scores: { overallBand: 6.5 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue({
+        toObject: () => ({ _id: examId, title: "Exam 1", status: "published", sections: [] }),
+        status: "published",
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(1 as never);
+
+    const result = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+
+    expect(result.canRetake).toBe(true);
+    expect(result.attemptsUsed).toBe(1);
+    expect(result.maxAttempts).toBe(3);
+    expect(result.assignmentId).toBe(assignmentId.toString());
+  });
+
+  it("sets canRetake=false when attemptsUsed reaches maxAttempts", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: examId, status: "published", kind: "mock" },
+      assignmentId: {
+        _id: assignmentId,
+        status: "active",
+        maxAttempts: 2,
+        deadline: new Date(Date.now() + 86400000),
+      },
+      answers: [],
+      scores: { overallBand: 6.5 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue({
+        toObject: () => ({ _id: examId, title: "Exam 1", status: "published", sections: [] }),
+        status: "published",
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(2 as never);
+
+    const result = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+
+    expect(result.canRetake).toBe(false);
+    expect(result.attemptsUsed).toBe(2);
+  });
+
+  it("sets canRetake=false when assignment deadline has passed", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: examId, status: "published", kind: "mock" },
+      assignmentId: {
+        _id: assignmentId,
+        status: "active",
+        maxAttempts: 5,
+        deadline: new Date(Date.now() - 3600000),
+      },
+      answers: [],
+      scores: { overallBand: 6.5 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue({
+        toObject: () => ({ _id: examId, title: "Exam 1", status: "published", sections: [] }),
+        status: "published",
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(1 as never);
+
+    const result = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+
+    expect(result.canRetake).toBe(false);
+  });
+
+  it("allows retake for practice mode when published and not closed", async () => {
+    const mockAttempt = {
+      _id: attemptId,
+      studentId: studentOwnerId,
+      status: "submitted",
+      examId: { _id: examId, status: "published", kind: "practice" },
+      assignmentId: null,
+      answers: [],
+      scores: { overallBand: 7.0 },
+    };
+    vi.spyOn(AttemptModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue(mockAttempt),
+    } as never);
+    vi.spyOn(ExamModel, "findById").mockReturnValue({
+      populate: vi.fn().mockResolvedValue({
+        toObject: () => ({ _id: examId, title: "Practice Exam", status: "published", kind: "practice", sections: [] }),
+        status: "published",
+        kind: "practice",
+      }),
+    } as never);
+    vi.spyOn(WritingReviewModel, "findOne").mockResolvedValue(null);
+    vi.spyOn(AttemptModel, "countDocuments").mockResolvedValueOnce(3 as never);
+
+    const result = await getAttemptResult(attemptId.toString(), {
+      id: studentOwnerId.toString(),
+      role: "student",
+    });
+
+    expect(result.canRetake).toBe(true);
+    expect(result.attemptsUsed).toBe(3);
   });
 });
 

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
+import { ExamModel } from "../exams/exam.model.js";
 import { AssignmentModel } from "./assignment.model.js";
 import {
   deleteAssignment,
@@ -81,6 +82,9 @@ describe("getAssignmentsForTeacher", () => {
       return mockFind as never;
     });
     vi.spyOn(AssignmentModel, "countDocuments").mockResolvedValueOnce(1 as never);
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([]),
+    } as never);
 
     const result = await getAssignmentsForTeacher(teacherId, "teacher", {
       classId: "c1",
@@ -115,6 +119,113 @@ describe("getAssignmentsForTeacher", () => {
     });
 
     expect(capturedQuery?.teacherId).toBeUndefined();
+  });
+
+  it("returns real progress stats and string-normalized ids", async () => {
+    const examId = new mongoose.Types.ObjectId();
+    const classId = new mongoose.Types.ObjectId();
+    const student1 = new mongoose.Types.ObjectId();
+    const student2 = new mongoose.Types.ObjectId();
+    const soloStudent = new mongoose.Types.ObjectId();
+    const classAssignmentId = new mongoose.Types.ObjectId();
+    const soloAssignmentId = new mongoose.Types.ObjectId();
+
+    const makeDoc = (value: Record<string, unknown>) => ({
+      ...value,
+      toObject: () => value,
+    });
+
+    const classAssignment = makeDoc({
+      _id: classAssignmentId,
+      teacherId: new mongoose.Types.ObjectId(teacherId),
+      examId: { _id: examId, title: "Mock Exam", kind: "mock" },
+      classId: { _id: classId, name: "Class A", students: [student1, student2] },
+      status: "active",
+      assignedAt: new Date("2026-09-01"),
+      deadline: null,
+      maxAttempts: 1,
+      shuffleQuestions: false,
+      showScoreAfterSubmit: true,
+    });
+    const soloAssignment = makeDoc({
+      _id: soloAssignmentId,
+      teacherId: new mongoose.Types.ObjectId(teacherId),
+      examId: { _id: examId, title: "Practice", kind: "practice" },
+      classId: null,
+      studentId: soloStudent,
+      status: "active",
+      assignedAt: new Date("2026-09-02"),
+      deadline: null,
+      maxAttempts: 1,
+      shuffleQuestions: false,
+      showScoreAfterSubmit: true,
+    });
+
+    const mockFind = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([classAssignment, soloAssignment]),
+    };
+    vi.spyOn(AssignmentModel, "find").mockReturnValueOnce(mockFind as never);
+    vi.spyOn(AssignmentModel, "countDocuments").mockResolvedValueOnce(2 as never);
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockResolvedValue([
+        { assignmentId: classAssignmentId, studentId: student1, status: "submitted" },
+        { assignmentId: classAssignmentId, studentId: student2, status: "in_progress" },
+        { assignmentId: soloAssignmentId, studentId: soloStudent, status: "submitted" },
+      ]),
+    } as never);
+
+    const result = await getAssignmentsForTeacher(teacherId, "teacher", {
+      page: 1,
+      limit: 10,
+    });
+
+    expect(result.assignments).toHaveLength(2);
+    expect(result.assignments[0]).toMatchObject({
+      id: classAssignmentId.toString(),
+      examId: examId.toString(),
+      classId: classId.toString(),
+      examTitle: "Mock Exam",
+      className: "Class A",
+      stats: { assigned: 2, submitted: 1, inProgress: 1 },
+    });
+    expect(result.assignments[1]).toMatchObject({
+      id: soloAssignmentId.toString(),
+      examId: examId.toString(),
+      classId: null,
+      stats: { assigned: 1, submitted: 1, inProgress: 0 },
+    });
+  });
+
+  it("passes the examId filter down to the database query", async () => {
+    const requestedExamId = new mongoose.Types.ObjectId();
+    let capturedQuery: Record<string, unknown> | undefined;
+
+    vi.spyOn(ExamModel, "find").mockResolvedValueOnce([
+      { _id: requestedExamId, kind: "mock" },
+    ] as never);
+    const mockFind = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    vi.spyOn(AssignmentModel, "find").mockImplementationOnce((query) => {
+      capturedQuery = query as Record<string, unknown>;
+      return mockFind as never;
+    });
+    vi.spyOn(AssignmentModel, "countDocuments").mockResolvedValueOnce(0 as never);
+
+    await getAssignmentsForTeacher(teacherId, "teacher", {
+      examId: requestedExamId.toString(),
+      kind: "mock",
+      page: 1,
+      limit: 10,
+    });
+
+    expect(capturedQuery?.examId).toBe(requestedExamId);
   });
 });
 

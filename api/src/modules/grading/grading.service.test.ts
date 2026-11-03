@@ -3,10 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { ForbiddenError } from "../../common/errors/AppError.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { WritingReviewModel } from "./writing-review.model.js";
+import { ExamModel } from "../exams/exam.model.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import {
   assertTeacherOwnsAttempt,
   canTeacherGradeAttempt,
   countWords,
+  getPendingWritingSubmissions,
   gradeWriting,
 } from "./grading.service.js";
 
@@ -162,3 +165,144 @@ describe("gradeWriting", () => {
     expect(result.task2Score).toBe(7.0);
   });
 });
+
+describe("getPendingWritingSubmissions", () => {
+  const teacherId = new mongoose.Types.ObjectId().toString();
+
+  it("returns empty result when no exams have writing skill", async () => {
+    vi.spyOn(ExamModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([]),
+      }),
+    } as never);
+
+    const result = await getPendingWritingSubmissions(teacherId, "teacher");
+
+    expect(result.items).toHaveLength(0);
+    expect(result.totalPending).toBe(0);
+  });
+
+  it("returns unreviewed pending writing submissions with pagination", async () => {
+    const examId1 = new mongoose.Types.ObjectId();
+    const examId2 = new mongoose.Types.ObjectId();
+    const attemptId1 = new mongoose.Types.ObjectId();
+    const attemptId2 = new mongoose.Types.ObjectId();
+    const reviewedAttemptId = new mongoose.Types.ObjectId();
+    const student1 = { _id: new mongoose.Types.ObjectId(), fullName: "Alice", email: "alice@test.com" };
+    const student2 = { _id: new mongoose.Types.ObjectId(), fullName: "Bob", email: "bob@test.com" };
+
+    vi.spyOn(ExamModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([
+          { _id: examId1, title: "Writing Test 1", createdBy: new mongoose.Types.ObjectId(teacherId) },
+          { _id: examId2, title: "Writing Test 2", createdBy: new mongoose.Types.ObjectId() },
+        ]),
+      }),
+    } as never);
+
+    vi.spyOn(AssignmentModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([]),
+      }),
+    } as never);
+
+    const mockAttempts = [
+      {
+        _id: attemptId1,
+        examId: examId1,
+        studentId: student1,
+        submittedAt: new Date("2026-09-01"),
+        suspicious: false,
+      },
+      {
+        _id: reviewedAttemptId,
+        examId: examId1,
+        studentId: student1,
+        submittedAt: new Date("2026-09-02"),
+        suspicious: false,
+      },
+      {
+        _id: attemptId2,
+        examId: examId1,
+        studentId: student2,
+        submittedAt: new Date("2026-09-03"),
+        suspicious: true,
+      },
+    ];
+
+    const mockSelect = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue(mockAttempts),
+      }),
+    };
+
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValue(mockSelect),
+    } as never);
+
+    vi.spyOn(WritingReviewModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([{ attemptId: reviewedAttemptId }]),
+      }),
+    } as never);
+
+    const result = await getPendingWritingSubmissions(teacherId, "teacher", {
+      page: 1,
+      limit: 1,
+    });
+
+    expect(result.totalPending).toBe(2);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      attemptId: attemptId1.toString(),
+      studentName: "Alice",
+      examTitle: "Writing Test 1",
+      hasSuspiciousActivity: false,
+    });
+  });
+
+  it("lets admin view all pending writing submissions without teacher ownership check", async () => {
+    const examId = new mongoose.Types.ObjectId();
+    const attemptId = new mongoose.Types.ObjectId();
+
+    vi.spyOn(ExamModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([
+          { _id: examId, title: "Admin Writing Exam", createdBy: new mongoose.Types.ObjectId() },
+        ]),
+      }),
+    } as never);
+
+    const mockSelect = {
+      populate: vi.fn().mockReturnThis(),
+      sort: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue([
+          {
+            _id: attemptId,
+            examId,
+            studentId: { fullName: "Charlie", email: "charlie@test.com" },
+            submittedAt: new Date("2026-09-05"),
+            suspicious: false,
+          },
+        ]),
+      }),
+    };
+
+    vi.spyOn(AttemptModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValue(mockSelect),
+    } as never);
+
+    vi.spyOn(WritingReviewModel, "find").mockReturnValueOnce({
+      select: vi.fn().mockReturnValueOnce({
+        lean: vi.fn().mockResolvedValue([]),
+      }),
+    } as never);
+
+    const result = await getPendingWritingSubmissions("admin-id", "admin");
+
+    expect(result.totalPending).toBe(1);
+    expect(result.items[0].studentName).toBe("Charlie");
+  });
+});
+
