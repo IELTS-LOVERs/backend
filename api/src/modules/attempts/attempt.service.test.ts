@@ -5,7 +5,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/err
 import { ExamModel, type IExam } from "../exams/exam.model.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
 import { WritingReviewModel } from "../grading/writing-review.model.js";
-import { AttemptModel, type IAttemptAnswer } from "./attempt.model.js";
+import { AttemptModel } from "./attempt.model.js";
 import {
   applyQuestionOrder,
   buildCandidateExam,

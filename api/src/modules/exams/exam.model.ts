@@ -26,9 +26,6 @@ export const DEFAULT_BAND_CONVERSION: IBandConversion = {
   readingType: "academic",
 };
 
-// Deprecated alias for backwards compatibility
-export type ExamType = ExamKind;
-
 /** Opaque ProseMirror JSON stored in Mongo (`Schema.Types.Mixed`). */
 export type RichDocValue = Record<string, unknown>;
 
@@ -75,9 +72,6 @@ export interface IExamCurriculum {
   orderIndex?: number;     // sort trong collection
 }
 
-// Deprecated alias for backwards compatibility
-export type ICurriculum = IExamCurriculum;
-
 export interface IExamVocabularyItem {
   _id?: Types.ObjectId;
   word: string;
@@ -86,18 +80,12 @@ export interface IExamVocabularyItem {
   contextSentence?: string;
 }
 
-// Deprecated alias for backwards compatibility
-export type IVocabularyItem = IExamVocabularyItem;
-
 export interface IExamPostSubmissionResources {
   solutionVideoUrl?: string;
   solutionDocumentUrl?: string;
   solutionNotes?: string;
   vocabularyItems?: IExamVocabularyItem[];
 }
-
-// Deprecated alias for backwards compatibility
-export type IPostSubmissionResources = IExamPostSubmissionResources;
 
 export interface IExam extends mongoose.Document {
   _id: Types.ObjectId;

@@ -7,12 +7,10 @@ import { ClassModel } from "../classes/class.model.js";
 import { ExamModel } from "../exams/exam.model.js";
 import {
   exportWeeklyReportCsv,
-  getClassWeeklyReport,
   getMondayKey,
   getPracticeCatalog,
   getPracticeHeatmap,
   toVnDateKey,
-  vnDayStartUtc,
 } from "./practice.service.js";
 
 describe("Vietnam Timezone and Date Helpers", () => {

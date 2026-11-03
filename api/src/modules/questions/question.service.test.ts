@@ -1,7 +1,6 @@
 import mongoose from "mongoose";
 import { describe, expect, it, vi } from "vitest";
-import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
-import { ExamModel } from "../exams/exam.model.js";
+import { ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { QuestionModel, type IQuestion } from "./question.model.js";
 import { assertOwner, getById, list, remove, serializeQuestion } from "./question.service.js";
 
