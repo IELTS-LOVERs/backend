@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type ValidationError } from "mongoose";
-import { UserModel } from "./user.model.js";
+import { UserModel, type UserRole, type UserStatus } from "./user.model.js";
 
 describe("UserModel", () => {
   it("registers expected schema paths", () => {
@@ -49,8 +49,8 @@ describe("UserModel", () => {
       email: "test@example.com",
       passwordHash: "hashed123",
       fullName: "Test User",
-      role: "superman" as unknown as any,
-      status: "deleted" as unknown as any,
+      role: "superman" as unknown as UserRole,
+      status: "deleted" as unknown as UserStatus,
     });
 
     let error: ValidationError | undefined;

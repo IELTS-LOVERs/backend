@@ -2,6 +2,7 @@ import { app } from "./app.js";
 import { env } from "./config/env.js";
 import { connectDB } from "./config/database.js";
 import { ensureBucket } from "./config/minio.js";
+import { logger } from "./common/utils/logger.js";
 
 async function bootstrap(): Promise<void> {
   await connectDB();
@@ -14,28 +15,27 @@ async function bootstrap(): Promise<void> {
       ),
     ]);
   } catch (error) {
-    console.warn(
-      "[minio] ⚠ Could not connect to MinIO — file uploads will be unavailable.",
-      error instanceof Error ? error.message : error,
-    );
+    logger.warn("minio.unavailable", {
+      message: error instanceof Error ? error.message : String(error),
+    });
   }
 
   app.listen(env.PORT, () => {
-    console.log(`[server] Server running on http://localhost:${env.PORT}`);
+    logger.info("server.started", { url: `http://localhost:${env.PORT}` });
   });
 }
 
 bootstrap().catch((error) => {
-  console.error("[server] Failed to start:", error);
+  logger.error("server.start_failed", { error });
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[server] Unhandled rejection:", reason);
+  logger.error("process.unhandled_rejection", { reason });
   process.exit(1);
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("[server] Uncaught exception:", error);
+  logger.error("process.uncaught_exception", { error });
   process.exit(1);
 });

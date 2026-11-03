@@ -10,6 +10,8 @@ import {
 } from "../../common/utils/ielts-calculator.js";
 import { logger } from "../../common/utils/logger.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
+import { ExamModel } from "../exams/exam.model.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import { WritingReviewModel } from "./writing-review.model.js";
 import type { GradeWritingBody } from "./grading.validation.js";
 
@@ -62,16 +64,6 @@ interface OwnershipAssignment {
   teacherId?: Types.ObjectId;
 }
 
-interface PopulatedExamSummary extends OwnershipExam {
-  title?: string;
-  sections?: { skill?: string }[];
-}
-
-interface PopulatedStudentSummary {
-  _id: Types.ObjectId;
-  fullName?: string;
-  email?: string;
-}
 
 interface PopulatedGradingSection {
   skill?: string;
@@ -87,6 +79,12 @@ interface PopulatedGradingSection {
 interface PopulatedGradingExam extends OwnershipExam {
   title?: string;
   sections?: PopulatedGradingSection[];
+}
+
+interface PopulatedStudentSummary {
+  _id: Types.ObjectId;
+  fullName?: string;
+  email?: string;
 }
 
 /** Counts whitespace-separated words; empty/blank strings yield 0. */
@@ -134,60 +132,87 @@ export async function getPendingWritingSubmissions(
   role: string,
   options: { page?: number; limit?: number } = {}
 ): Promise<PendingWritingResult> {
-  const attempts = await AttemptModel.find({
-    status: { $in: ["submitted", "expired"] },
-  })
-    .populate([
-      { path: "examId", select: "title createdBy sections.skill" },
-      { path: "studentId", select: "fullName email" },
-      { path: "assignmentId", select: "teacherId" },
-    ])
-    .sort({ submittedAt: 1 });
+  const writingExamsQuery = ExamModel.find({ "sections.skill": "writing" }).select(
+    "_id title createdBy"
+  );
+  const writingExams =
+    typeof (writingExamsQuery as { lean?: () => unknown }).lean === "function"
+      ? await (writingExamsQuery as { lean: () => Promise<Array<{ _id: unknown; title?: string; createdBy?: unknown }>> }).lean()
+      : await (writingExamsQuery as unknown as Promise<Array<{ _id: unknown; title?: string; createdBy?: unknown }>>);
 
-  const gradable = attempts.filter((attempt) => {
-    const exam = attempt.examId as unknown as PopulatedExamSummary | null;
+  const writingExamMap = new Map<string, { _id: unknown; title?: string; createdBy?: unknown }>(
+    (writingExams ?? []).map((e) => [String(e._id), e])
+  );
+  const writingExamIds = Array.from(writingExamMap.keys());
 
-    if (!exam) return false;
-    if (!(exam.sections ?? []).some((section) => section.skill === "writing")) {
-      return false;
-    }
-
-    return canTeacherGradeAttempt(attempt, teacherId, role);
-  });
-
-  const attemptIds = gradable.map((attempt) => attempt._id);
-  const reviewedIds =
-    attemptIds.length > 0
-      ? new Set(
-          (
-            await WritingReviewModel.find({ attemptId: { $in: attemptIds } }).select(
-              "attemptId"
-            )
-          ).map((review) => review.attemptId.toString())
-        )
-      : new Set<string>();
-
-  const items: PendingWritingSubmission[] = [];
-
-  for (const attempt of gradable) {
-    if (reviewedIds.has(attempt._id.toString())) continue;
-
-    const exam = attempt.examId as unknown as PopulatedExamSummary;
-    const student = attempt.studentId as unknown as PopulatedStudentSummary | null;
-
-    items.push({
-      attemptId: attempt._id.toString(),
-      studentName: student?.fullName ?? "",
-      studentEmail: student?.email ?? "",
-      examTitle: exam.title ?? "",
-      submittedAt: attempt.submittedAt ?? null,
-      hasSuspiciousActivity: attempt.suspicious,
-    });
+  if (writingExamIds.length === 0) {
+    return { items: [], totalPending: 0 };
   }
 
-  // FIX-22: optional pagination. NOTE: the filtering above still loads all
-  // submitted attempts and filters in memory; a full rewrite to an aggregate
-  // with DB-side paging is deferred (see FIX_RESULT.md).
+  const attemptFilter: Record<string, unknown> = {
+    status: { $in: ["submitted", "expired"] },
+    examId: { $in: writingExamIds },
+  };
+
+  if (role !== "admin") {
+    const teacherAssignmentsQuery = AssignmentModel.find({
+      teacherId,
+      examId: { $in: writingExamIds },
+    }).select("_id");
+    const teacherAssignments =
+      typeof (teacherAssignmentsQuery as { lean?: () => unknown }).lean === "function"
+        ? await (teacherAssignmentsQuery as { lean: () => Promise<Array<{ _id: unknown }>> }).lean()
+        : await (teacherAssignmentsQuery as unknown as Promise<Array<{ _id: unknown }>>);
+    const teacherAssignmentIds = (teacherAssignments ?? []).map((a) => a._id);
+
+    const teacherCreatedExamIds = (writingExams ?? [])
+      .filter((e) => e.createdBy && String(e.createdBy) === String(teacherId))
+      .map((e) => e._id);
+
+    attemptFilter.$or = [
+      { examId: { $in: teacherCreatedExamIds } },
+      { assignmentId: { $in: teacherAssignmentIds } },
+    ];
+  }
+
+  const attemptsQuery = AttemptModel.find(attemptFilter)
+    .select("_id examId studentId assignmentId submittedAt suspicious")
+    .populate("studentId", "fullName email")
+    .sort({ submittedAt: 1 });
+
+  const attempts =
+    typeof (attemptsQuery as { lean?: () => unknown }).lean === "function"
+      ? await (attemptsQuery as { lean: () => Promise<Array<Record<string, unknown>>> }).lean()
+      : await (attemptsQuery as unknown as Promise<Array<Record<string, unknown>>>);
+
+  const attemptIds: string[] = (attempts ?? []).map((a) => String(a._id));
+  let reviewedIds = new Set<string>();
+  if (attemptIds.length > 0) {
+    const reviewsQuery = WritingReviewModel.find({ attemptId: { $in: attemptIds } }).select(
+      "attemptId"
+    );
+    const reviews =
+      typeof (reviewsQuery as { lean?: () => unknown }).lean === "function"
+        ? await (reviewsQuery as { lean: () => Promise<Array<{ attemptId: unknown }>> }).lean()
+        : await (reviewsQuery as unknown as Promise<Array<{ attemptId: unknown }>>);
+    reviewedIds = new Set((reviews ?? []).map((r) => String(r.attemptId)));
+  }
+
+  const pendingAttempts = (attempts ?? []).filter((a) => !reviewedIds.has(String(a._id)));
+
+  const items: PendingWritingSubmission[] = pendingAttempts.map((attempt) => {
+    const exam = writingExamMap.get(String(attempt.examId));
+    const student = attempt.studentId as { fullName?: string; email?: string } | null;
+    return {
+      attemptId: String(attempt._id),
+      studentName: student?.fullName ?? "",
+      studentEmail: student?.email ?? "",
+      examTitle: exam?.title ?? "",
+      submittedAt: (attempt.submittedAt as Date | null) ?? null,
+      hasSuspiciousActivity: Boolean(attempt.suspicious),
+    };
+  });
+
   const totalPending = items.length;
   const paginationRequested =
     options.page !== undefined || options.limit !== undefined;

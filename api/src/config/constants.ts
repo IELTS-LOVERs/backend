@@ -148,11 +148,3 @@ export const EXAM_GRACE_PERIOD_SECONDS = env.EXAM_GRACE_PERIOD_SECONDS;
 export const ANTI_CHEAT_TAB_SWITCH_THRESHOLD = env.ANTI_CHEAT_TAB_SWITCH_THRESHOLD;
 export const ANTI_CHEAT_FULLSCREEN_EXIT_THRESHOLD = env.ANTI_CHEAT_FULLSCREEN_EXIT_THRESHOLD;
 export const ANTI_CHEAT_PASTE_THRESHOLD = env.ANTI_CHEAT_PASTE_THRESHOLD;
-
-export function mapLegacyTypeToGroupType(legacyType: string): string {
-  const MAP: Record<string, string> = {
-    multiple_choice: "multiple_choice_single",
-    matching: "matching_headings", // best guess for generic "matching"
-  };
-  return MAP[legacyType] ?? legacyType;
-}

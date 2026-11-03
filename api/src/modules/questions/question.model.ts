@@ -28,35 +28,8 @@ export type QuestionGroupType =
   | "writing_task_2";
 
 /**
- * Legacy flat question types.
- *
- * @deprecated The bank stores Question Groups (`groupType`). Kept only so
- * remaining tooling/tests can reference the old shape.
+ * Opaque ProseMirror JSON stored in Mongo (`Schema.Types.Mixed`).
  */
-export type QuestionType =
-  | "multiple_choice"
-  | "multiple_choice_single"
-  | "multiple_choice_multiple"
-  | "form_completion"
-  | "note_completion"
-  | "table_completion"
-  | "sentence_completion"
-  | "matching"
-  | "matching_headings"
-  | "matching_information"
-  | "matching_features"
-  | "matching_sentence_endings"
-  | "map_labelling"
-  | "diagram_labelling"
-  | "summary_completion"
-  | "true_false_not_given"
-  | "yes_no_not_given"
-  | "short_answer"
-  | "flow_chart_completion"
-  | "writing_task_1"
-  | "writing_task_2";
-
-/** Opaque ProseMirror JSON stored in Mongo (`Schema.Types.Mixed`). */
 export type RichDocValue = Record<string, unknown>;
 
 /** One answer slot stored inside a bank Question Group. */

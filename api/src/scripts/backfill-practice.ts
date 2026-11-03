@@ -8,6 +8,7 @@ import {
   type IExam,
 } from "../modules/exams/exam.model.js";
 import { countExamQuestions } from "../modules/exams/exam.service.js";
+import { countExamPoints } from "../common/utils/exam-points.util.js";
 
 type LeanExam = {
   _id: Types.ObjectId;
@@ -33,17 +34,6 @@ type LeanAttempt = {
   };
 };
 
-function countExamPoints(exam?: LeanExam): number {
-  let points = 0;
-  for (const section of exam?.sections ?? []) {
-    for (const group of section.questionGroups ?? []) {
-      for (const question of group.questions ?? []) {
-        points += question.points ?? 1;
-      }
-    }
-  }
-  return points;
-}
 
 interface BackfillResult {
   examsChecked: number;

@@ -1,3 +1,4 @@
+import { assertOwnership } from "../../common/utils/ownership.util.js";
 import { randomInt } from "node:crypto";
 import mongoose, { type Types } from "mongoose";
 import {
@@ -88,13 +89,6 @@ export function isMember(cls: Pick<IClass, "students">, studentId: string): bool
   return cls.students.some((id) => id.toString() === studentId);
 }
 
-export function assertOwnership(cls: Pick<IClass, "teacherId">, userId: string, role: string): void {
-  if (role === "admin") return;
-
-  if (cls.teacherId.toString() !== userId) {
-    throw new ForbiddenError("FORBIDDEN", "Người dùng không đủ quyền thực hiện hành động.");
-  }
-}
 
 export async function createClass(
   teacherId: string,
@@ -398,3 +392,5 @@ export async function leaveClass(
 
   return { message: "Đã rời lớp học thành công" };
 }
+
+export { assertOwnership };

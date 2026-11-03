@@ -14,6 +14,23 @@ export interface AccessTokenPayload {
   sid?: string;
 }
 
+/** The authenticated principal attached by {@link authenticate}. */
+export type AuthenticatedUser = NonNullable<Request["user"]>;
+
+/**
+ * Returns the authenticated user or throws 401. Controllers previously
+ * duplicated this guard; keep one copy here so the error shape stays stable.
+ */
+export function requireUser(req: Request): AuthenticatedUser {
+  if (!req.user) {
+    throw new UnauthorizedError(
+      "UNAUTHORIZED",
+      "Token không hợp lệ hoặc thiếu Authorization Header."
+    );
+  }
+  return req.user;
+}
+
 /**
  * FIX-05: authenticates the bearer access token AND checks the live user state,
  * so a suspended account or a bumped `tokenVersion` (password change / admin

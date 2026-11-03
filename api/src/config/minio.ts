@@ -111,9 +111,9 @@ export async function ensureBucket(bucketName: string): Promise<void> {
 
   if (!exists) {
     await minioClient.makeBucket(bucketName);
-    console.log(`[minio] Bucket "${bucketName}" created`);
+    logger.info("media.bucket_created", { bucket: bucketName });
   } else {
-    console.log(`[minio] Bucket "${bucketName}" ready`);
+    logger.info("media.bucket_ready", { bucket: bucketName });
   }
 
   await ensureBucketPolicy(bucketName);
@@ -148,7 +148,7 @@ export async function ensureBucketPolicy(bucketName: string): Promise<void> {
 
   try {
     await minioClient.setBucketPolicy(bucketName, buildPublicReadPolicy(bucketName));
-    console.log(`[minio] Bucket "${bucketName}" policy: public-read`);
+    logger.info("media.bucket_policy_applied", { bucket: bucketName });
   } catch (error) {
     // Never block boot: uploads still work, only public GETs may 403.
     logger.warn("media.bucket_policy_failed", {

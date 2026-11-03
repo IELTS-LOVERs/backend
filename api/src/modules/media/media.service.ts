@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import {
   BadRequestError,
   ForbiddenError,
@@ -72,7 +72,7 @@ export function buildMediaObjectKey(
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
 
-  return `uploads/${type}/${year}/${month}/${uuidv4()}_${sanitizeFilename(filename)}`;
+  return `uploads/${type}/${year}/${month}/${randomUUID()}_${sanitizeFilename(filename)}`;
 }
 
 export async function createPresignedUpload(

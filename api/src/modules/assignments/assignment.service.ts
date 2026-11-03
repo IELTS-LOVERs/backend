@@ -6,8 +6,7 @@ import { ClassModel } from "../classes/class.model.js";
 import {
   ExamModel,
   type ExamKind,
-  type ExamType,
-  type ICurriculum,
+  type IExamCurriculum,
   type IExam,
 } from "../exams/exam.model.js";
 import { UserModel } from "../users/user.model.js";
@@ -49,15 +48,15 @@ export interface MyAssignment {
   scores: IAttemptScores | null;
   kind?: ExamKind;
   examKind?: ExamKind;
-  type: ExamType;
-  curriculum?: ICurriculum;
+  type: ExamKind;
+  curriculum?: IExamCurriculum;
 }
 
 export interface MyAssignmentsFilters {
   classId?: string;
   status?: SubmissionStatus | "all";
   kind?: ExamKind;
-  type?: ExamType | "exam";
+  type?: ExamKind | "exam";
 }
 
 export interface AssignmentDetail {
@@ -86,8 +85,8 @@ interface PopulatedExam {
   _id: Types.ObjectId;
   title: string;
   durationMinutes: number;
-  type?: ExamType;
-  curriculum?: ICurriculum;
+  type?: ExamKind;
+  curriculum?: IExamCurriculum;
 }
 
 interface PopulatedTeacher {
@@ -409,8 +408,8 @@ export async function getMyAssignments(
     classId: string | null;
     className: string | null;
     kind: ExamKind;
-    type: ExamType;
-    curriculum?: ICurriculum;
+    type: ExamKind;
+    curriculum?: IExamCurriculum;
   }> = [];
 
   for (const assignment of assignments) {
@@ -419,7 +418,7 @@ export async function getMyAssignments(
     if (!exam) continue;
 
     const examKind: ExamKind = exam.kind ?? (exam.type === "practice" ? "practice" : "mock");
-    const examType: ExamType = examKind;
+    const examType: ExamKind = examKind;
 
     const requestedKind: ExamKind | undefined =
       filters.kind ??
@@ -557,7 +556,7 @@ export interface AssignmentProgressResult {
 export async function getAssignmentsForTeacher(
   teacherId: string,
   role: string,
-  filters: { classId?: string; examId?: string; kind?: ExamKind; type?: ExamType | "exam"; page: number; limit: number }
+  filters: { classId?: string; examId?: string; kind?: ExamKind; type?: ExamKind | "exam"; page: number; limit: number }
 ): Promise<{
   assignments: unknown[];
   meta: { page: number; limit: number; total: number; totalPages: number };
@@ -576,14 +575,21 @@ export async function getAssignmentsForTeacher(
   }
 
   if (requestedKind) {
-    const matchingExams = await ExamModel.find({
+    const examQuery = ExamModel.find({
       kind: requestedKind === "mock" ? { $in: ["mock", null] } : "practice",
-    } as mongoose.QueryFilter<IExam>).select("_id");
+    } as mongoose.QueryFilter<IExam>);
+    const matchingExams =
+      typeof (examQuery as { select?: (fields: string) => unknown }).select === "function"
+        ? await (examQuery as { select: (fields: string) => Promise<Array<{ _id: mongoose.Types.ObjectId }>> }).select("_id")
+        : await (examQuery as unknown as Promise<Array<{ _id: mongoose.Types.ObjectId }>>);
     const matchingIds = matchingExams.map((e) => e._id);
     if (examId) {
       const examObjId = new mongoose.Types.ObjectId(examId);
-      if (matchingIds.some((id) => id.equals(examObjId))) {
-        query.examId = examObjId;
+      const match = matchingIds.find(
+        (id) => String(id) === String(examId) || (typeof id === "object" && "equals" in id && (id as { equals: (o: unknown) => boolean }).equals(examObjId))
+      );
+      if (match) {
+        query.examId = match;
       } else {
         query.examId = new mongoose.Types.ObjectId();
       }
@@ -599,28 +605,90 @@ export async function getAssignmentsForTeacher(
   const [assignments, total] = await Promise.all([
     AssignmentModel.find(query)
       .populate("examId", "title durationMinutes kind type curriculum")
-      .populate("classId", "name code")
+      .populate("classId", "name code students")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
     AssignmentModel.countDocuments(query),
   ]);
 
-  const mappedAssignments = assignments.map((doc: any) => {
-    const a = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
-    const examObj = a.examId && typeof a.examId === 'object' ? a.examId : null;
-    const classObj = a.classId && typeof a.classId === 'object' ? a.classId : null;
+  const assignmentIds: string[] = assignments.map((doc: { _id?: unknown; id?: unknown }) =>
+    String(doc._id ?? doc.id)
+  );
+  const attemptsQuery = AttemptModel.find({ assignmentId: { $in: assignmentIds } }).select(
+    "assignmentId studentId status"
+  );
+  const attempts =
+    assignmentIds.length > 0
+      ? (typeof (attemptsQuery as { lean?: () => unknown }).lean === "function"
+          ? await (attemptsQuery as { lean: () => Promise<Array<{ assignmentId?: unknown; studentId?: unknown; status?: string }>> }).lean()
+          : await (attemptsQuery as unknown as Promise<Array<{ assignmentId?: unknown; studentId?: unknown; status?: string }>>))
+      : [];
+
+  const mappedAssignments = assignments.map((doc: unknown) => {
+    const docRecord = doc as Record<string, unknown> & {
+      toObject?: () => Record<string, unknown>;
+      _id?: unknown;
+      id?: unknown;
+    };
+    const a = typeof docRecord.toObject === "function" ? docRecord.toObject() : { ...docRecord };
+    const examObj = a.examId && typeof a.examId === "object" ? (a.examId as Record<string, unknown>) : null;
+    const classObj = a.classId && typeof a.classId === "object" ? (a.classId as Record<string, unknown>) : null;
     const itemKind = examObj?.kind ?? (examObj?.type === "practice" ? "practice" : "mock");
+
+    const rawExamId = examObj?._id ?? a.examId;
+    const rawClassId = classObj?._id ?? a.classId;
+    const normalizedExamId = rawExamId
+      ? typeof rawExamId === "object" && "_id" in (rawExamId as Record<string, unknown>)
+        ? String((rawExamId as { _id?: unknown })._id)
+        : String(rawExamId)
+      : "";
+    const normalizedClassId = rawClassId
+      ? typeof rawClassId === "object" && "_id" in (rawClassId as Record<string, unknown>)
+        ? String((rawClassId as { _id?: unknown })._id)
+        : String(rawClassId)
+      : null;
+
+    const aIdStr = (docRecord._id ?? docRecord.id ?? "").toString();
+    const assignAttempts = (attempts ?? []).filter(
+      (att) => att.assignmentId && att.assignmentId.toString() === aIdStr
+    );
+    const submittedStudents = new Set(
+      assignAttempts
+        .filter((att) => att.status === "submitted")
+        .map((att) => (att.studentId ? att.studentId.toString() : ""))
+        .filter(Boolean)
+    );
+    const inProgressStudents = new Set(
+      assignAttempts
+        .filter((att) => att.status === "in_progress" && !submittedStudents.has(att.studentId ? att.studentId.toString() : ""))
+        .map((att) => (att.studentId ? att.studentId.toString() : ""))
+        .filter(Boolean)
+    );
+
+    let assigned = 0;
+    if (classObj && Array.isArray(classObj.students)) {
+      assigned = classObj.students.length;
+    } else if (a.studentId) {
+      assigned = 1;
+    }
+
     return {
       ...a,
-      id: doc._id ? doc._id.toString() : doc.id || '',
-      examTitle: a.examTitle ?? examObj?.title ?? '',
+      id: aIdStr,
+      examId: normalizedExamId,
+      classId: normalizedClassId,
+      examTitle: (a.examTitle as string | undefined) ?? (examObj?.title as string | undefined) ?? "",
       kind: itemKind,
       type: itemKind,
       curriculum: examObj?.curriculum,
-      className: a.className ?? classObj?.name ?? null,
-      targetLabel: a.targetLabel ?? classObj?.name ?? '—',
-      stats: a.stats ?? { assigned: 0, submitted: 0, inProgress: 0 },
+      className: (a.className as string | undefined) ?? (classObj?.name as string | undefined) ?? null,
+      targetLabel: (a.targetLabel as string | undefined) ?? (classObj?.name as string | undefined) ?? "—",
+      stats: (a.stats as { assigned: number; submitted: number; inProgress: number } | undefined) ?? {
+        assigned,
+        submitted: submittedStudents.size,
+        inProgress: inProgressStudents.size,
+      },
     };
   });
 

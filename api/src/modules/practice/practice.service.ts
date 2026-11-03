@@ -1,3 +1,4 @@
+import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { csvEscape } from "../../common/utils/csv.js";
@@ -12,9 +13,6 @@ import type { CatalogQuery, HeatmapQuery } from "./practice.validation.js";
 export const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 /** Escape user input before passing it to `new RegExp` (prevents 500/ReDoS). */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 export function toVnDateKey(date: Date): string {
   return new Date(date.getTime() + VN_OFFSET_MS).toISOString().slice(0, 10);
