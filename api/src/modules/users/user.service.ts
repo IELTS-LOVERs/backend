@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { ConflictError, NotFoundError } from "../../common/errors/AppError.js";
 import { escapeRegExp } from "../../common/utils/escape-regexp.js";
 import { logger } from "../../common/utils/logger.js";
+import { invalidateAuthUserCache } from "../../common/middlewares/auth.middleware.js";
 import { ClassModel } from "../classes/class.model.js";
 import { UserModel, type IUser, type UserStatus } from "./user.model.js";
 import type {
@@ -255,6 +256,7 @@ export async function updateUserStatus(
   }
 
   await user.save();
+  invalidateAuthUserCache(userId);
 
   logger.info("users.status_updated", { userId, status });
 
@@ -276,6 +278,7 @@ export async function revokeSessions(userId: string): Promise<void> {
   user.activeSessionId = undefined;
   user.tokenVersion = (user.tokenVersion ?? 0) + 1;
   await user.save();
+  invalidateAuthUserCache(userId);
 
   logger.info("auth.admin_revoke_sessions", { userId });
 }

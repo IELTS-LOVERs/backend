@@ -111,11 +111,19 @@ export async function listCollections(
   const limit = query.limit ?? 50;
   const skip = (page - 1) * limit;
 
+  let findQuery = CollectionModel.find(filter);
+  if (typeof (findQuery as { select?: unknown }).select === "function") {
+    findQuery = (findQuery as { select: (p: string) => typeof findQuery }).select(
+      "_id name parentId description bannerUrl orderIndex createdAt updatedAt"
+    );
+  }
+
   const [rawDocs, total] = await Promise.all([
-    CollectionModel.find(filter)
+    findQuery
       .sort({ orderIndex: 1, createdAt: -1 })
       .lean()
       .exec(),
+
     CollectionModel.countDocuments(filter).exec(),
   ]);
 
@@ -219,7 +227,16 @@ export async function listCollections(
 }
 
 export async function getCollectionTree(): Promise<CollectionTreeNode[]> {
-  const allCollections = await CollectionModel.find({}).lean().exec();
+  let treeQuery = CollectionModel.find({});
+  if (typeof (treeQuery as { select?: unknown }).select === "function") {
+    treeQuery = (treeQuery as { select: (p: string) => typeof treeQuery }).select(
+      "_id name parentId description bannerUrl orderIndex"
+    );
+  }
+  const allCollections = await treeQuery
+    .lean()
+    .exec();
+
   const collator = new Intl.Collator("vi", { numeric: true, sensitivity: "base" });
 
   // Natural sort
@@ -351,7 +368,9 @@ export async function getCollectionDetail(
   const exams = await ExamModel.find({
     "curriculum.collectionName": collection.name,
   })
-    .select("_id title kind scoringMode status durationMinutes sections curriculum createdAt updatedAt")
+    .select(
+      "_id title kind scoringMode status durationMinutes sections._id sections.skill sections.part sections.title curriculum createdAt updatedAt"
+    )
     .lean()
     .exec();
 

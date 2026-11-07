@@ -6,7 +6,7 @@ import { canStaffViewStudent } from "../../common/utils/student-access.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
 import { AttemptModel, type IAttempt } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
-import { ExamModel } from "../exams/exam.model.js";
+import { ExamModel, type IExam } from "../exams/exam.model.js";
 import { countExamQuestions, countExamPoints, normalizeBannerUrl } from "../exams/exam.service.js";
 import type { CatalogQuery, HeatmapQuery } from "./practice.validation.js";
 
@@ -201,25 +201,45 @@ export async function getPracticeCatalog(
     filter.title = new RegExp(escapeRegExp(query.search.trim()), "i");
   }
 
-  const exams = await ExamModel.find(filter).sort({
+  let examsQuery = ExamModel.find(filter);
+  if (typeof (examsQuery as { select?: unknown }).select === "function") {
+    examsQuery = (examsQuery as { select: (p: string) => typeof examsQuery }).select(
+      "-sections.passageDoc -sections.instructionsDoc -sections.transcript -sections.mediaIds"
+    );
+  }
+  let chainedExams = examsQuery.sort({
     "curriculum.collectionName": 1,
     "curriculum.testNumber": 1,
     "curriculum.orderIndex": 1,
     "curriculum.part": 1,
     title: 1,
   });
+  if (typeof (chainedExams as { lean?: unknown }).lean === "function") {
+    chainedExams = (chainedExams as { lean: () => typeof chainedExams }).lean();
+  }
+  const exams = (await chainedExams) as unknown as IExam[];
 
   if (exams.length === 0) {
     return { items: [] };
   }
 
   const examIds = exams.map((e) => e._id);
-  const attempts = await AttemptModel.find({
+  let attQuery = AttemptModel.find({
     studentId: new mongoose.Types.ObjectId(studentId),
     examId: { $in: examIds },
-  }).select("examId status scores submittedAt questionCount startedAt updatedAt");
+  });
+  if (typeof (attQuery as { select?: unknown }).select === "function") {
+    attQuery = (attQuery as { select: (p: string) => typeof attQuery }).select(
+      "examId status scores submittedAt questionCount startedAt updatedAt totalPoints correctCount wrongCount blankCount"
+    );
+  }
+  if (typeof (attQuery as { lean?: unknown }).lean === "function") {
+    attQuery = (attQuery as { lean: () => typeof attQuery }).lean();
+  }
+  const attempts = (await attQuery) as unknown as IAttempt[];
 
-  const attemptsByExam = new Map<string, IAttempt[]>();
+  const attemptsByExam = new Map<string, typeof attempts>();
+
   for (const attempt of attempts) {
     const k = attempt.examId.toString();
     const list = attemptsByExam.get(k) ?? [];
@@ -378,15 +398,31 @@ export async function getPracticeHeatmap(
   const startUtc = vnDayStartUtc(from);
   const endUtc = vnDayEndUtc(to);
 
-  const attempts = await AttemptModel.find({
+  let attemptsFind = AttemptModel.find({
     studentId: new mongoose.Types.ObjectId(targetStudentId),
     status: "submitted",
     suspicious: { $ne: true },
     submittedAt: { $gte: startUtc, $lte: endUtc },
-  }).populate<{ examId: { kind?: string; type?: string; sections?: Array<{ skill: string }> } }>(
+  });
+  if (typeof (attemptsFind as { select?: unknown }).select === "function") {
+    attemptsFind = (attemptsFind as { select: (p: string) => typeof attemptsFind }).select(
+      "examId examKind submittedAt skills"
+    );
+  }
+  let chainedAttempts = attemptsFind.populate<{ examId: { kind?: string; type?: string; sections?: Array<{ skill: string }> } }>(
     "examId",
     "kind type sections.skill"
   );
+  if (typeof (chainedAttempts as { lean?: unknown }).lean === "function") {
+    chainedAttempts = (chainedAttempts as { lean: () => typeof chainedAttempts }).lean();
+  }
+  const attempts = (await chainedAttempts) as unknown as Array<{
+    examId?: { kind?: string; type?: string; sections?: Array<{ skill: string }> };
+    examKind?: string;
+    submittedAt?: Date;
+    skills?: string[];
+  }>;
+
 
   // Group practice attempts by VN date
   const dayStatsMap = new Map<string, SkillPracticeCounts>();
@@ -503,9 +539,11 @@ export async function getClassWeeklyReport(
   weekStartQuery?: string,
   studentIdFilter?: string
 ): Promise<WeeklyReportResponse> {
-  const cls = await ClassModel.findById(classId).populate<{
-    students: Array<{ _id: Types.ObjectId; fullName: string; email: string }>;
-  }>("students", "fullName email");
+  const cls = await ClassModel.findById(classId)
+    .populate<{
+      students: Array<{ _id: Types.ObjectId; fullName: string; email: string }>;
+    }>("students", "fullName email")
+    .lean();
 
   if (!cls) {
     throw new NotFoundError("Lớp học không tồn tại.");
@@ -539,7 +577,9 @@ export async function getClassWeeklyReport(
       { classId: cls._id, $or: dueDateConditions },
       { studentId: { $in: studentIds }, $or: dueDateConditions },
     ],
-  }).select("_id examId deadline assignedAt classId studentId");
+  })
+    .select("_id examId deadline assignedAt classId studentId")
+    .lean();
 
   const assignmentIds = assignments.map((a) => a._id);
 
@@ -552,11 +592,15 @@ export async function getClassWeeklyReport(
           { submittedAt: { $gte: startUtc, $lte: endUtc } },
           { assignmentId: { $in: assignmentIds } },
         ],
-      }).populate<{ examId: { kind?: string; type?: string; sections?: Array<{ skill: string }> } }>(
-        "examId",
-        "kind type sections.skill"
-      )
+      })
+        .select("_id studentId status assignmentId submittedAt examKind examId skills scores totalPoints questionCount")
+        .populate<{ examId: { kind?: string; type?: string; sections?: Array<{ skill: string }> } }>(
+          "examId",
+          "kind type sections.skill"
+        )
+        .lean()
     : [];
+
 
   const weekDayKeys: string[] = [];
   for (let i = 0; i < 7; i++) {

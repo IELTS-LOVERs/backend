@@ -41,3 +41,8 @@ export function createRateLimiter(
     },
   });
 }
+
+/** Rate limiter for authentication login route (20 attempts/min, skip successful). */
+export const authLimiter: RequestHandler = createRateLimiter(20, 60_000, {
+  skipSuccessfulRequests: true,
+});

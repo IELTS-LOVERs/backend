@@ -248,6 +248,7 @@ ExamSchema.virtual("type").get(function (this: IExam) {
 
 ExamSchema.index({ status: 1, createdBy: 1 });
 ExamSchema.index({ kind: 1, status: 1, createdBy: 1 });
+ExamSchema.index({ createdBy: 1, createdAt: -1 });
 ExamSchema.index({
   kind: 1,
   status: 1,

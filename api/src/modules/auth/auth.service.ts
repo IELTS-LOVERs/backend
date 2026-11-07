@@ -9,6 +9,7 @@ import {
   type IUser,
   type IRefreshSession,
 } from "../users/user.model.js";
+import { invalidateAuthUserCache } from "../../common/middlewares/auth.middleware.js";
 import { isSingleDeviceRole } from "./auth.policy.js";
 import type { ChangePasswordBody, LoginBody, RegisterBody } from "./auth.validation.js";
 
@@ -200,6 +201,7 @@ async function persistRefreshSession(
   active.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   user.refreshSessions = active.slice(0, MAX_REFRESH_SESSIONS);
   await user.save();
+  invalidateAuthUserCache(user._id.toString());
 }
 
 /**
@@ -442,6 +444,7 @@ export async function refresh(
           $unset: { activeSessionId: 1 },
         }
       );
+      invalidateAuthUserCache(payload.sub);
       throw new UnauthorizedError("REFRESH_TOKEN_INVALID", "Refresh Token không hợp lệ.");
     }
   }
@@ -591,6 +594,7 @@ export async function logout(refreshToken?: string): Promise<void> {
     update.$unset = { activeSessionId: 1 };
   }
   await UserModel.updateOne({ _id: user._id }, update);
+  invalidateAuthUserCache(payload.sub);
 
   logger.info("auth.logout", { userId: payload.sub });
 }
@@ -617,6 +621,7 @@ export async function changePassword(
   user.refreshSessions = [];
   user.activeSessionId = undefined;
   await user.save();
+  invalidateAuthUserCache(userId);
 
   logger.info("auth.password_changed", { userId });
 }

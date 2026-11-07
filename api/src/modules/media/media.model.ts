@@ -36,6 +36,7 @@ const MediaSchema = new Schema<IMedia>(
 
 MediaSchema.index({ key: 1 }, { unique: true });
 MediaSchema.index({ uploadedBy: 1 });
+MediaSchema.index({ uploadedBy: 1, createdAt: -1 });
 MediaSchema.index({ status: 1, createdAt: 1 });
 
 export const MediaModel = model<IMedia>("Media", MediaSchema);

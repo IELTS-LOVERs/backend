@@ -95,6 +95,7 @@ const QuestionSchema = new Schema<IQuestion>(
 
 QuestionSchema.index({ skill: 1, part: 1, groupType: 1 });
 QuestionSchema.index({ createdBy: 1 });
+QuestionSchema.index({ createdBy: 1, createdAt: -1 });
 
 // A bank entry is a Question Group: it must contain at least one question.
 QuestionSchema.path("questions").validate(function (value: IBankQuestionItem[]) {

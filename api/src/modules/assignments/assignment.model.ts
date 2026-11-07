@@ -38,6 +38,7 @@ const AssignmentSchema = new Schema<IAssignment>(
 
 AssignmentSchema.index({ classId: 1, status: 1 });
 AssignmentSchema.index({ studentId: 1, status: 1 });
+AssignmentSchema.index({ teacherId: 1, createdAt: -1 });
 AssignmentSchema.index({ examId: 1 });
 
 export const AssignmentModel = model<IAssignment>("Assignment", AssignmentSchema);

@@ -1,7 +1,7 @@
 import mongoose, { type Types } from "mongoose";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../common/errors/AppError.js";
 import { csvEscape } from "../../common/utils/csv.js";
-import { AttemptModel, type IAttemptScores } from "../attempts/attempt.model.js";
+import { AttemptModel, type IAttempt, type IAttemptScores } from "../attempts/attempt.model.js";
 import { ClassModel } from "../classes/class.model.js";
 import {
   ExamModel,
@@ -392,11 +392,22 @@ export async function getMyAssignments(
         $or: [{ classId: { $in: classIds } }, { studentId }],
       };
 
-  const assignments = await AssignmentModel.find(assignmentQuery)
+  let assignQuery = AssignmentModel.find(assignmentQuery);
+  if (typeof (assignQuery as { select?: unknown }).select === "function") {
+    assignQuery = (assignQuery as { select: (p: string) => typeof assignQuery }).select(
+      "_id examId teacherId classId deadline"
+    );
+  }
+  let chainedAssign = assignQuery
     .populate("examId", "title durationMinutes kind type curriculum")
     .populate("teacherId", "fullName")
     .populate("classId", "name")
     .sort({ assignedAt: -1 });
+  if (typeof (chainedAssign as { lean?: unknown }).lean === "function") {
+    chainedAssign = (chainedAssign as { lean: () => typeof chainedAssign }).lean();
+  }
+  const assignments = await chainedAssign;
+
 
   const entries: Array<{
     id: string;
@@ -448,16 +459,32 @@ export async function getMyAssignments(
   const assignmentIds = entries.map((entry) => new mongoose.Types.ObjectId(entry.id));
   const examIds = entries.map((entry) => new mongoose.Types.ObjectId(entry.examId));
 
-  const attempts =
+  let attemptsQuery =
     entries.length > 0
-      ? await AttemptModel.find({
+      ? AttemptModel.find({
           studentId,
           $or: [
             { assignmentId: { $in: assignmentIds } },
             { examId: { $in: examIds } },
           ],
-        }).select("assignmentId examId status scores submittedAt updatedAt")
+        })
       : [];
+
+  let rawAttempts: unknown;
+  if (Array.isArray(attemptsQuery)) {
+    rawAttempts = attemptsQuery;
+  } else if (typeof (attemptsQuery as { select?: unknown }).select === "function") {
+    let sel = (attemptsQuery as { select: (p: string) => unknown }).select(
+      "assignmentId examId status scores submittedAt updatedAt"
+    );
+    if (typeof (sel as { lean?: unknown }).lean === "function") {
+      sel = (sel as { lean: () => unknown }).lean();
+    }
+    rawAttempts = await sel;
+  } else {
+    rawAttempts = await attemptsQuery;
+  }
+  const attempts = (Array.isArray(rawAttempts) ? rawAttempts : []) as unknown as IAttempt[];
 
   const statuses = resolveSubmissionStatuses(
     attempts.map((attempt) => ({
@@ -602,13 +629,24 @@ export async function getAssignmentsForTeacher(
 
   const skip = (page - 1) * limit;
 
+  let findQuery = AssignmentModel.find(query);
+  if (typeof (findQuery as { select?: unknown }).select === "function") {
+    findQuery = (findQuery as { select: (p: string) => typeof findQuery }).select(
+      "_id examId classId studentId deadline status maxAttempts shuffleQuestions showScoreAfterSubmit createdAt"
+    );
+  }
+  let chainedQuery = findQuery
+    .populate("examId", "title durationMinutes kind type curriculum")
+    .populate("classId", "name code students")
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
+  if (typeof (chainedQuery as { lean?: unknown }).lean === "function") {
+    chainedQuery = (chainedQuery as { lean: () => typeof chainedQuery }).lean();
+  }
+
   const [assignments, total] = await Promise.all([
-    AssignmentModel.find(query)
-      .populate("examId", "title durationMinutes kind type curriculum")
-      .populate("classId", "name code students")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit),
+    chainedQuery,
     AssignmentModel.countDocuments(query),
   ]);
 
