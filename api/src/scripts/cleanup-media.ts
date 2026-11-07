@@ -13,22 +13,28 @@ async function main(): Promise<void> {
     const staleMedia = await MediaModel.find({
       status: "pending",
       createdAt: { $lt: cutoff },
-    });
+    })
+      .select("_id key")
+      .lean();
 
-    let removed = 0;
-
-    for (const media of staleMedia) {
-      try {
-        await minioClient.removeObject(env.MINIO_BUCKET, media.key);
-      } catch {
-        // MinIO object might already be gone
-      }
-
-      await MediaModel.deleteOne({ _id: media._id });
-      removed += 1;
+    if (staleMedia.length === 0) {
+      console.log("[cleanup-media] Không có media pending cần dọn.");
+      return;
     }
 
-    console.log(`[cleanup-media] Đã dọn ${removed}/${staleMedia.length} media pending quá 24h.`);
+    const keys = staleMedia.map((m) => m.key);
+    const orphanIds = staleMedia.map((m) => m._id);
+
+    try {
+      await minioClient.removeObjects(env.MINIO_BUCKET, keys);
+    } catch (err) {
+      console.warn("[cleanup-media] Cảnh báo khi dọn MinIO objects theo batch:", err);
+    }
+
+    const deleteResult = await MediaModel.deleteMany({ _id: { $in: orphanIds } });
+    console.log(
+      `[cleanup-media] Đã dọn ${deleteResult.deletedCount}/${staleMedia.length} media pending quá 24h.`
+    );
   } finally {
     await disconnectDB();
   }

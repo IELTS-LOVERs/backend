@@ -146,10 +146,13 @@ const AttemptSchema = new Schema<IAttempt>(
 );
 
 AttemptSchema.index({ examId: 1, status: 1 });
+AttemptSchema.index({ examId: 1, status: 1, submittedAt: -1 });
 AttemptSchema.index({ assignmentId: 1 });
 AttemptSchema.index({ status: 1, expiresAt: 1 });
 AttemptSchema.index({ studentId: 1, status: 1, submittedAt: 1 });
+AttemptSchema.index({ studentId: 1, status: 1, submittedAt: -1 });
 AttemptSchema.index({ studentId: 1, examKind: 1, status: 1, submittedAt: 1 });
+AttemptSchema.index({ suspicious: 1, updatedAt: -1 });
 AttemptSchema.index(
   { studentId: 1, examId: 1 },
   {

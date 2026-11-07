@@ -84,10 +84,20 @@ export async function getExamAnalytics(
 
   assertOwnership(exam, userId, role);
 
-  const attempts = (await AttemptModel.find({
+  let attemptsQuery = AttemptModel.find({
     examId: exam._id,
     status: { $in: ["submitted", "expired"] },
-  }).select("answers scores")) as unknown as AnalyticsAttempt[];
+  });
+  if (typeof (attemptsQuery as { select?: unknown }).select === "function") {
+    attemptsQuery = (attemptsQuery as { select: (p: string) => typeof attemptsQuery }).select(
+      "answers scores"
+    );
+  }
+  if (typeof (attemptsQuery as { lean?: unknown }).lean === "function") {
+    attemptsQuery = (attemptsQuery as { lean: () => typeof attemptsQuery }).lean();
+  }
+  const attempts = (await attemptsQuery) as unknown as AnalyticsAttempt[];
+
 
   const sectionStats = new Map<string, SectionAccuracy>();
   const questionStats = new Map<string, HardestQuestion>();
@@ -245,14 +255,26 @@ export async function getClassAnalytics(
       (student as Types.ObjectId & { _id?: Types.ObjectId })._id ?? (student as Types.ObjectId)
   );
 
-  const students = await UserModel.find({ _id: { $in: studentIds } }).select(
-    "fullName email"
-  );
+  let studentsQuery = UserModel.find({ _id: { $in: studentIds } });
+  if (typeof (studentsQuery as { select?: unknown }).select === "function") {
+    studentsQuery = (studentsQuery as { select: (p: string) => typeof studentsQuery }).select("fullName email");
+  }
+  if (typeof (studentsQuery as { lean?: unknown }).lean === "function") {
+    studentsQuery = (studentsQuery as { lean: () => typeof studentsQuery }).lean();
+  }
+  const students = (await studentsQuery) as unknown as Array<{ _id: Types.ObjectId; fullName?: string; email?: string }>;
 
-  const attempts = (await AttemptModel.find({
+  let attemptsQuery = AttemptModel.find({
     studentId: { $in: studentIds },
     status: { $in: ["submitted", "expired"] },
-  }).select("studentId scores")) as unknown as (AnalyticsAttempt & {
+  });
+  if (typeof (attemptsQuery as { select?: unknown }).select === "function") {
+    attemptsQuery = (attemptsQuery as { select: (p: string) => typeof attemptsQuery }).select("studentId scores");
+  }
+  if (typeof (attemptsQuery as { lean?: unknown }).lean === "function") {
+    attemptsQuery = (attemptsQuery as { lean: () => typeof attemptsQuery }).lean();
+  }
+  const attempts = (await attemptsQuery) as unknown as (AnalyticsAttempt & {
     studentId: Types.ObjectId;
   })[];
 
@@ -264,8 +286,8 @@ export async function getClassAnalytics(
     return {
       student: {
         id: student._id.toString(),
-        fullName: student.fullName,
-        email: student.email,
+        fullName: student.fullName ?? "",
+        email: student.email ?? "",
       },
       attempts: studentAttempts.length,
       listening: averageBand(
@@ -328,21 +350,40 @@ export async function getStudentProgress(
     );
   }
 
-  const student = await UserModel.findById(studentId).select(
-    "fullName email role targetBand"
-  );
+  let studentQuery = UserModel.findById(studentId);
+  if (typeof (studentQuery as { select?: unknown }).select === "function") {
+    studentQuery = (studentQuery as { select: (p: string) => typeof studentQuery }).select("fullName email role targetBand");
+  }
+  if (typeof (studentQuery as { lean?: unknown }).lean === "function") {
+    studentQuery = (studentQuery as { lean: () => typeof studentQuery }).lean();
+  }
+  const student = (await studentQuery) as unknown as { _id: Types.ObjectId; role: string; fullName?: string; email?: string; targetBand?: number } | null;
 
   if (!student || student.role !== "student") {
     throw new NotFoundError("Học sinh không tồn tại.");
   }
 
-  const attempts = await AttemptModel.find({
+  let progressQuery = AttemptModel.find({
     studentId,
     status: { $in: ["submitted", "expired"] },
-  })
+  });
+  if (typeof (progressQuery as { select?: unknown }).select === "function") {
+    progressQuery = (progressQuery as { select: (p: string) => typeof progressQuery }).select("_id examId submittedAt scores");
+  }
+  let chainedProgress = progressQuery
     .populate("examId", "title")
     .sort({ submittedAt: 1 })
     .limit(query.limit ?? 20);
+  if (typeof (chainedProgress as { lean?: unknown }).lean === "function") {
+    chainedProgress = (chainedProgress as { lean: () => typeof chainedProgress }).lean();
+  }
+  const attempts = (await chainedProgress) as unknown as Array<{
+    _id: Types.ObjectId;
+    examId: unknown;
+    submittedAt?: Date;
+    scores?: IAttemptScores;
+  }>;
+
 
   const points: StudentProgressPoint[] = attempts.map((attempt) => {
     const exam = attempt.examId as unknown as {
@@ -381,8 +422,8 @@ export async function getStudentProgress(
     studentId,
     student: {
       id: student._id.toString(),
-      fullName: student.fullName,
-      email: student.email,
+      fullName: student.fullName ?? "",
+      email: student.email ?? "",
     },
     targetBand,
     latest,

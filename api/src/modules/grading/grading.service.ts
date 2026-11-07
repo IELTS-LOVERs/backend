@@ -12,6 +12,7 @@ import { logger } from "../../common/utils/logger.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
 import { ExamModel } from "../exams/exam.model.js";
 import { AssignmentModel } from "../assignments/assignment.model.js";
+import { UserModel } from "../users/user.model.js";
 import { WritingReviewModel } from "./writing-review.model.js";
 import type { GradeWritingBody } from "./grading.validation.js";
 
@@ -177,7 +178,6 @@ export async function getPendingWritingSubmissions(
 
   const attemptsQuery = AttemptModel.find(attemptFilter)
     .select("_id examId studentId assignmentId submittedAt suspicious")
-    .populate("studentId", "fullName email")
     .sort({ submittedAt: 1 });
 
   const attempts =
@@ -199,10 +199,62 @@ export async function getPendingWritingSubmissions(
   }
 
   const pendingAttempts = (attempts ?? []).filter((a) => !reviewedIds.has(String(a._id)));
+  const totalPending = pendingAttempts.length;
 
-  const items: PendingWritingSubmission[] = pendingAttempts.map((attempt) => {
+  const paginationRequested =
+    options.page !== undefined || options.limit !== undefined;
+  const page = Math.max(1, options.page ?? 1);
+  const limit = Math.max(1, options.limit ?? 20);
+  const paginatedAttempts = paginationRequested
+    ? pendingAttempts.slice((page - 1) * limit, page * limit)
+    : pendingAttempts;
+
+  // Over-fetch optimization: populate user details only for the current page slice
+  const unpopulatedStudentIds = Array.from(
+    new Set(
+      paginatedAttempts
+        .map((a) => {
+          if (!a.studentId) return null;
+          if (typeof a.studentId === "object" && "fullName" in (a.studentId as object)) {
+            return null; // Already populated
+          }
+          if (typeof a.studentId === "object" && "_id" in (a.studentId as object)) {
+            return String((a.studentId as { _id: unknown })._id);
+          }
+          return String(a.studentId);
+        })
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  const students =
+    unpopulatedStudentIds.length > 0
+      ? await UserModel.find({ _id: { $in: unpopulatedStudentIds } })
+          .select("_id fullName email")
+          .lean()
+      : [];
+
+  const studentMap = new Map(students.map((s) => [String(s._id), s]));
+
+  const items: PendingWritingSubmission[] = paginatedAttempts.map((attempt) => {
     const exam = writingExamMap.get(String(attempt.examId));
-    const student = attempt.studentId as { fullName?: string; email?: string } | null;
+    let student: { fullName?: string; email?: string } | undefined;
+    if (
+      attempt.studentId &&
+      typeof attempt.studentId === "object" &&
+      "fullName" in (attempt.studentId as object)
+    ) {
+      student = attempt.studentId as { fullName?: string; email?: string };
+    } else {
+      const sId =
+        attempt.studentId &&
+        typeof attempt.studentId === "object" &&
+        "_id" in (attempt.studentId as object)
+          ? String((attempt.studentId as { _id: unknown })._id)
+          : String(attempt.studentId);
+      student = studentMap.get(sId);
+    }
+
     return {
       attemptId: String(attempt._id),
       studentName: student?.fullName ?? "",
@@ -213,17 +265,7 @@ export async function getPendingWritingSubmissions(
     };
   });
 
-  const totalPending = items.length;
-  const paginationRequested =
-    options.page !== undefined || options.limit !== undefined;
-  const paginatedItems = paginationRequested
-    ? items.slice(
-        (Math.max(1, options.page ?? 1) - 1) * Math.max(1, options.limit ?? 20),
-        Math.max(1, options.page ?? 1) * Math.max(1, options.limit ?? 20)
-      )
-    : items;
-
-  return { items: paginatedItems, totalPending };
+  return { items, totalPending };
 }
 
 export async function getAttemptForGrading(
@@ -233,7 +275,7 @@ export async function getAttemptForGrading(
 ): Promise<AttemptGradingView> {
   const attempt = await AttemptModel.findById(attemptId)
     .populate([
-      { path: "examId", select: "title createdBy sections" },
+      { path: "examId", select: "title createdBy" },
       { path: "assignmentId", select: "teacherId" },
       { path: "studentId", select: "fullName" },
     ]);
@@ -273,8 +315,9 @@ export async function getAttemptForGrading(
   }
 
   // Legacy attempts (no snapshot yet): fall back to the live exam.
-  if (tasksByNumber.size === 0) {
-    for (const section of exam?.sections ?? []) {
+  if (tasksByNumber.size === 0 && exam?._id) {
+    const fullExam = await ExamModel.findById(exam._id).select("sections").lean();
+    for (const section of fullExam?.sections ?? []) {
       // New path: question groups
       const hasGroups = Array.isArray(section.questionGroups) && section.questionGroups.length > 0;
       if (hasGroups) {

@@ -102,8 +102,14 @@ function serializeStartResult(
 }
 
 async function loadPopulatedExam(examId: Types.ObjectId | string): Promise<IExam> {
-  const exam = await ExamModel.findById(examId)
-    .populate({ path: "sections.mediaIds", model: "Media" });
+  const query = ExamModel.findById(examId);
+  const exam =
+    typeof (query as { populate?: unknown }).populate === "function"
+      ? await (query as { populate: (opts: unknown) => Promise<IExam | null> }).populate({
+          path: "sections.mediaIds",
+          model: "Media",
+        })
+      : await (query as unknown as Promise<IExam | null>);
 
   if (!exam) {
     throw new NotFoundError("Đề thi không tồn tại.");
@@ -649,12 +655,10 @@ export async function getAttemptResult(
   attemptId: string,
   currentUser: { id: string; role: string }
 ): Promise<AttemptResult> {
-  const attempt = await AttemptModel.findById(attemptId)
-    .populate([
-      { path: "examId", select: "createdBy title durationMinutes" },
-      { path: "studentId", select: "name fullName email" },
-      { path: "assignmentId", select: "teacherId showScoreAfterSubmit maxAttempts status deadline" },
-    ]);
+  const attempt = await AttemptModel.findById(attemptId).populate([
+    { path: "studentId", select: "name fullName email" },
+    { path: "assignmentId", select: "teacherId showScoreAfterSubmit maxAttempts status deadline" },
+  ]);
 
   if (!attempt) {
     throw new NotFoundError("Bài làm không tồn tại.");
@@ -662,7 +666,7 @@ export async function getAttemptResult(
 
   const studentOwnerId =
     (attempt.studentId as unknown as { _id?: Types.ObjectId | string })?._id?.toString() ??
-    attempt.studentId.toString();
+    attempt.studentId?.toString();
 
   if (currentUser.role === "student") {
     if (studentOwnerId !== currentUser.id) {
@@ -671,8 +675,30 @@ export async function getAttemptResult(
         "Học sinh không có quyền truy cập bài làm này."
       );
     }
-  } else {
-    assertTeacherOwnsAttempt(attempt, currentUser.id, currentUser.role);
+  }
+
+  const examIdRef =
+    (attempt.examId as unknown as { _id?: Types.ObjectId })?._id ?? attempt.examId;
+
+  if (currentUser.role !== "student") {
+    let examOwnership = attempt.examId as unknown as { createdBy?: unknown } | null;
+    const assignmentDoc = attempt.assignmentId as unknown as { teacherId?: unknown } | null;
+    const ownsAssignment = Boolean(
+      assignmentDoc?.teacherId && String(assignmentDoc.teacherId) === currentUser.id
+    );
+
+    if (!ownsAssignment && currentUser.role === "teacher" && !examOwnership?.createdBy) {
+      const examDoc = await ExamModel.findById(examIdRef).select("createdBy").lean();
+      if (examDoc) {
+        examOwnership = examDoc as unknown as { createdBy?: unknown };
+      }
+    }
+
+    assertTeacherOwnsAttempt(
+      { examId: examOwnership, assignmentId: attempt.assignmentId },
+      currentUser.id,
+      currentUser.role
+    );
   }
 
   if (attempt.status !== "submitted" && attempt.status !== "expired") {
@@ -684,15 +710,32 @@ export async function getAttemptResult(
   } | null;
   const showScore = !(currentUser.role === "student" && assignment?.showScoreAfterSubmit === false);
 
-  const examIdRef =
-    (attempt.examId as unknown as { _id?: Types.ObjectId })._id ?? attempt.examId;
-  const populatedExam = await loadPopulatedExam(examIdRef);
-  const examObj = populatedExam.toObject() as unknown as RawExamObject;
+  const hasSnapshot = Boolean(attempt.resultDetails && attempt.resultDetails.length > 0);
+  let examQuery = ExamModel.findById(examIdRef);
+  if (typeof (examQuery as { select?: unknown }).select === "function") {
+    if (hasSnapshot) {
+      examQuery = (examQuery as { select: (p: string) => typeof examQuery }).select(
+        "createdBy title durationMinutes kind scoringMode postSubmissionResources status closeAt"
+      );
+    } else {
+      examQuery = (examQuery as { select: (p: string) => typeof examQuery }).select(
+        "-sections.mediaIds"
+      );
+    }
+  }
+  const populatedExam =
+    typeof (examQuery as { populate?: unknown }).populate === "function"
+      ? await (examQuery as { populate: (opts: unknown) => Promise<IExam | null> }).populate([])
+      : await (examQuery as unknown as Promise<IExam | null>);
+
+  if (!populatedExam) {
+    throw new NotFoundError("Đề thi không tồn tại.");
+  }
+
   let details: ResultQuestionDetail[];
 
-  if (attempt.resultDetails && attempt.resultDetails.length > 0) {
-    // Preferred path: immutable snapshot taken at submit time.
-    details = attempt.resultDetails.map((detail) => ({
+  if (hasSnapshot) {
+    details = attempt.resultDetails!.map((detail) => ({
       questionId: detail.questionId.toString(),
       questionNumber: detail.questionNumber,
       groupType: detail.groupType,
@@ -705,8 +748,10 @@ export async function getAttemptResult(
       prompt: detail.prompt,
     }));
   } else {
-    // Legacy attempts submitted before snapshots existed: derive from the
-    // live exam. Results are only stable once the backfill script has run.
+    const examObj =
+      typeof (populatedExam as { toObject?: () => unknown }).toObject === "function"
+        ? (populatedExam as { toObject: () => RawExamObject }).toObject()
+        : (populatedExam as unknown as RawExamObject);
     const snapshot = buildResultDetails(examObj, attempt.answers);
     details = snapshot.details.map((d) => ({
       questionId: d.questionId.toString(),
@@ -725,7 +770,7 @@ export async function getAttemptResult(
   const review = await WritingReviewModel.findOne({ attemptId: attempt._id });
 
   const student = attempt.studentId as unknown as { name?: string; fullName?: string; email?: string } | null;
-  const exam = attempt.examId as unknown as { title?: string; durationMinutes?: number } | null;
+  const exam = (populatedExam ?? attempt.examId) as unknown as { title?: string; durationMinutes?: number } | null;
 
   const startedAt = attempt.startedAt;
   const submittedAt = attempt.submittedAt ?? attempt.updatedAt;
@@ -746,19 +791,10 @@ export async function getAttemptResult(
   let questionCount = attempt.questionCount;
   let totalPoints = attempt.totalPoints;
   if (!questionCount || !totalPoints) {
-    let count = 0;
-    let points = 0;
-    for (const section of examObj.sections ?? []) {
-      for (const group of section.questionGroups ?? []) {
-        count += (group.questions ?? []).length;
-        for (const q of group.questions ?? []) {
-          points += q.points ?? 1;
-        }
-      }
-    }
-    if (!questionCount) questionCount = count;
-    if (!totalPoints) totalPoints = points;
+    questionCount = questionCount || details.length;
+    totalPoints = totalPoints || details.reduce((acc, d) => acc + (d.points ?? 1), 0);
   }
+
 
   let correctCount = attempt.correctCount;
   let wrongCount = attempt.wrongCount;

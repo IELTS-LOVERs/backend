@@ -31,6 +31,27 @@ export function requireUser(req: Request): AuthenticatedUser {
   return req.user;
 }
 
+export interface CachedAuthUser {
+  id: string;
+  status: string;
+  tokenVersion?: number;
+  role: string;
+  email: string;
+  activeSessionId?: string | null;
+  cachedAt: number;
+}
+
+const AUTH_USER_CACHE_TTL_MS = 15_000;
+const authUserCache = new Map<string, CachedAuthUser>();
+
+export function invalidateAuthUserCache(userId?: string): void {
+  if (userId) {
+    authUserCache.delete(userId);
+  } else {
+    authUserCache.clear();
+  }
+}
+
 /**
  * FIX-05: authenticates the bearer access token AND checks the live user state,
  * so a suspended account or a bumped `tokenVersion` (password change / admin
@@ -38,6 +59,8 @@ export function requireUser(req: Request): AuthenticatedUser {
  * The role is taken from the database, not the token, so role changes apply at
  * once. FIX-20: tokens carry a `type` discriminator (legacy tokens without one
  * are still accepted during the transition; wrong types are rejected).
+ * Uses an in-memory cache with short 15s TTL to eliminate duplicate DB reads
+ * on high-frequency requests.
  */
 export async function authenticate(
   req: Request,
@@ -79,16 +102,38 @@ export async function authenticate(
   }
 
   try {
-    const user = await UserModel.findById(payload.sub).select(
-      "status tokenVersion role email activeSessionId"
-    );
+    const now = Date.now();
+    let userState = authUserCache.get(payload.sub);
 
-    if (!user || user.status === "suspended") {
+    if (!userState || now - userState.cachedAt > AUTH_USER_CACHE_TTL_MS) {
+      const user = await UserModel.findById(payload.sub).select(
+        "status tokenVersion role email activeSessionId"
+      );
+
+      if (!user) {
+        authUserCache.delete(payload.sub);
+        next(new UnauthorizedError("UNAUTHORIZED", "Tài khoản không khả dụng."));
+        return;
+      }
+
+      userState = {
+        id: user._id.toString(),
+        status: user.status,
+        tokenVersion: user.tokenVersion,
+        role: user.role,
+        email: user.email,
+        activeSessionId: user.activeSessionId,
+        cachedAt: now,
+      };
+      authUserCache.set(payload.sub, userState);
+    }
+
+    if (userState.status === "suspended") {
       next(new UnauthorizedError("UNAUTHORIZED", "Tài khoản không khả dụng."));
       return;
     }
 
-    if ((payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+    if ((payload.tokenVersion ?? 0) !== (userState.tokenVersion ?? 0)) {
       next(new UnauthorizedError("TOKEN_REVOKED", "Phiên đăng nhập đã bị thu hồi."));
       return;
     }
@@ -96,8 +141,8 @@ export async function authenticate(
     // Single-device policy (last-login-wins): the access token must belong to
     // the currently active session. Legacy tokens without `sid` are asked to
     // refresh once so they can be upgraded in place.
-    if (isSingleDeviceRole(user.role)) {
-      if (!payload.sid || !user.activeSessionId) {
+    if (isSingleDeviceRole(userState.role)) {
+      if (!payload.sid || !userState.activeSessionId) {
         next(
           new UnauthorizedError(
             "SESSION_REQUIRED",
@@ -107,7 +152,7 @@ export async function authenticate(
         return;
       }
 
-      if (payload.sid !== user.activeSessionId) {
+      if (payload.sid !== userState.activeSessionId) {
         next(
           new UnauthorizedError(
             "SESSION_REPLACED",
@@ -119,9 +164,9 @@ export async function authenticate(
     }
 
     req.user = {
-      id: user._id.toString(),
-      role: user.role,
-      email: user.email,
+      id: userState.id,
+      role: userState.role,
+      email: userState.email,
     };
     next();
   } catch (error) {

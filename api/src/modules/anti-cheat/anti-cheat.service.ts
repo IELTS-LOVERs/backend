@@ -10,6 +10,8 @@ import {
   ANTI_CHEAT_TAB_SWITCH_THRESHOLD,
 } from "../../config/constants.js";
 import { AttemptModel } from "../attempts/attempt.model.js";
+import { ExamModel } from "../exams/exam.model.js";
+import { AssignmentModel } from "../assignments/assignment.model.js";
 import {
   assertTeacherOwnsAttempt,
   canTeacherGradeAttempt,
@@ -278,12 +280,35 @@ export async function getSuspiciousAttempts(
   role: string,
   limit: number
 ): Promise<SuspiciousReportResult> {
-  const attempts = await AttemptModel.find({ suspicious: true })
+  const query: Record<string, unknown> = { suspicious: true };
+
+  if (role !== "admin" && mongoose.connection.readyState === 1) {
+    try {
+      const [teacherExams, teacherAssignments] = await Promise.all([
+        ExamModel.find({ createdBy: userId }).select("_id").lean(),
+        AssignmentModel.find({ teacherId: userId }).select("_id").lean(),
+      ]);
+
+      const teacherExamIds = (teacherExams ?? []).map((e) => e._id);
+      const teacherAssignmentIds = (teacherAssignments ?? []).map((a) => a._id);
+
+      query.$or = [
+        { examId: { $in: teacherExamIds } },
+        { assignmentId: { $in: teacherAssignmentIds } },
+      ];
+    } catch {
+      // Fallback to post-query filter
+    }
+  }
+
+  const attemptsQuery = AttemptModel.find(query)
     .populate("examId", "title createdBy")
     .populate("studentId", "fullName email")
     .populate("assignmentId", "teacherId")
     .sort({ updatedAt: -1 })
     .limit(limit);
+
+  const attempts = await attemptsQuery;
 
   const visible = attempts.filter((attempt) =>
     canTeacherGradeAttempt(attempt, userId, role)
@@ -323,17 +348,18 @@ export async function getSuspiciousAttempts(
         fullName?: string;
         email?: string;
       } | null;
-      const eventsByType = countsByAttempt.get(attempt._id.toString()) ?? {};
+      const attemptIdStr = String(attempt._id);
+      const eventsByType = countsByAttempt.get(attemptIdStr) ?? {};
       const totalEvents = Object.values(eventsByType).reduce(
         (acc, value) => acc + value,
         0
       );
 
       return {
-        attemptId: attempt._id.toString(),
+        attemptId: attemptIdStr,
         studentName: student?.fullName ?? student?.email ?? "",
         examTitle: exam?.title ?? "",
-        submittedAt: attempt.submittedAt ?? null,
+        submittedAt: (attempt.submittedAt as Date | null) ?? null,
         totalEvents,
         eventsByType,
       };

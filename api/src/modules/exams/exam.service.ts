@@ -188,7 +188,12 @@ export async function list(
   if (and.length > 0) query.$and = and;
 
   const sortSpec = EXAM_LIST_SORTS[sort ?? "date_desc"];
-  const examsQuery = ExamModel.find(query);
+  let examsQuery = ExamModel.find(query);
+  if (typeof (examsQuery as { select?: unknown }).select === "function") {
+    examsQuery = (examsQuery as { select: (p: string) => typeof examsQuery }).select(
+      "-sections.passageDoc -sections.instructionsDoc -sections.transcript -sections.mediaIds"
+    );
+  }
 
   // `numericOrdering` makes Mongo sort "CAM 8" before "CAM 9"/"CAM 10" across
   // the whole result set (not just the current page).

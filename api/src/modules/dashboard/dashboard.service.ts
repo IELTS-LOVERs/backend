@@ -113,9 +113,6 @@ export async function getTeacherDashboard(
   }
   const totalStudents = studentIdSet.size;
 
-  const pendingGradingResult = await getPendingWritingSubmissions(userId, role);
-  const pendingGradingCount = pendingGradingResult.totalPending;
-
   const studentObjectIds = Array.from(studentIdSet).map(
     (id) => new mongoose.Types.ObjectId(id)
   );
@@ -133,19 +130,25 @@ export async function getTeacherDashboard(
     }
   }
 
-  const [scoredAttempts, rawRecentSubmissions] = await Promise.all([
+  const [pendingGradingResult, scoredAttempts, rawRecentSubmissions] = await Promise.all([
+    getPendingWritingSubmissions(userId, role),
     AttemptModel.find({
       ...attemptFilter,
       "scores.overallBand": { $ne: null },
       $or: [{ examKind: "mock" }, { examKind: { $exists: false } }],
-    }).select("scores.overallBand"),
+    })
+      .select("scores.overallBand")
+      .lean(),
     AttemptModel.find(attemptFilter)
       .select("_id studentId examId submittedAt scores.overallBand suspicious")
       .populate("studentId", "fullName email")
       .populate("examId", "title")
       .sort({ submittedAt: -1 })
-      .limit(5),
+      .limit(5)
+      .lean(),
   ]);
+
+  const pendingGradingCount = pendingGradingResult.totalPending;
 
   const bandScores = scoredAttempts.map(
     (attempt) => attempt.scores?.overallBand ?? null

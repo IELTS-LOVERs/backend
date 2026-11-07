@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../../common/middlewares/auth.middleware.js";
+import { authLimiter } from "../../common/middlewares/rateLimiter.js";
 import { validate } from "../../common/middlewares/validate.middleware.js";
 import * as authController from "./auth.controller.js";
 import { ChangePasswordSchema, LoginSchema, RegisterSchema } from "./auth.validation.js";
@@ -7,7 +8,7 @@ import { ChangePasswordSchema, LoginSchema, RegisterSchema } from "./auth.valida
 const router = Router();
 
 router.post("/register", validate(RegisterSchema), authController.register);
-router.post("/login", validate(LoginSchema), authController.login);
+router.post("/login", authLimiter, validate(LoginSchema), authController.login);
 router.post("/refresh", authController.refresh);
 router.post("/logout", authController.logout);
 router.post(
